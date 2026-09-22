@@ -111,7 +111,7 @@ try {
     [Environment]::SetEnvironmentVariable('PATH', $env:PATH + ';C:\Program Files\dotnet', 'Machine')
     Write-DemoPass '.NET 8' 'Installed current .NET 8 channel'
 
-    $vsInstallMode = (Get-MetadataValue 'vs-install-mode' 'web-buildtools').ToLowerInvariant()
+    $vsInstallMode = (Get-MetadataValue 'vs-install-mode' 'web-community').ToLowerInvariant()
     $vsEdition = (Get-MetadataValue 'vs-edition' 'enterprise').ToLowerInvariant()
     $vsInstallRoot = $null
 
@@ -126,6 +126,18 @@ try {
             Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vs_BuildTools.exe' -OutFile $vsInstaller
             $vsInstallRoot = 'C:\BuildTools'
             $vsArgs = '--quiet --wait --norestart --nocache --installPath C:\BuildTools --add Microsoft.VisualStudio.Workload.MSBuildTools --add Microsoft.VisualStudio.Workload.NetWeb --includeRecommended'
+            Invoke-Installer $vsInstaller $vsArgs
+        }
+        'web-community' {
+            Write-DemoInfo 'Downloading Visual Studio 2022 Community from Microsoft'
+            $vsInstaller = Join-Path $work 'vs_Community.exe'
+            Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vs_community.exe' -OutFile $vsInstaller
+            $configPath = Join-Path $work 'vs2022.vsconfig'
+            $configBase64 = Get-MetadataValue 'vs-config-b64' ''
+            if ([string]::IsNullOrWhiteSpace($configBase64)) { throw 'Visual Studio configuration is missing' }
+            [IO.File]::WriteAllBytes($configPath, [Convert]::FromBase64String($configBase64))
+            $vsInstallRoot = 'C:\VisualStudio\2022\Community'
+            $vsArgs = "--quiet --wait --norestart --nocache --installPath `"$vsInstallRoot`" --config `"$configPath`""
             Invoke-Installer $vsInstaller $vsArgs
         }
         'offline-iso' {
@@ -186,7 +198,7 @@ try {
     if ($vsInstallMode -ne 'disabled') {
         $msbuild = Join-Path $vsInstallRoot 'MSBuild\Current\Bin\MSBuild.exe'
         if (-not (Test-Path $msbuild)) { throw 'Visual Studio installation completed but MSBuild was not found' }
-        if ($vsInstallMode -eq 'offline-iso') {
+        if ($vsInstallMode -in @('web-community', 'offline-iso')) {
             $devenv = Join-Path $vsInstallRoot 'Common7\IDE\devenv.exe'
             if (-not (Test-Path $devenv)) { throw 'Full Visual Studio installation completed but devenv.exe was not found' }
         }

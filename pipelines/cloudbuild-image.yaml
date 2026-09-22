@@ -28,9 +28,9 @@ substitutions:
   _SOURCE_IMAGE_FAMILY: windows-2022
   _IMAGE_FAMILY: windows-github-runner
   _RUNNER_VERSION: 2.328.0
-  # web-buildtools keeps the sample runnable without licensed media.
+  # web-community installs the full Community IDE without an ISO.
   # Use offline-iso to demonstrate mounting and licensing full Visual Studio.
-  _VS_INSTALL_MODE: offline-iso
+  _VS_INSTALL_MODE: web-community
   _VS_EDITION: community
   _VS_MEDIA_URI: gs://replace-me/vs2022-community-layout.iso
   _VS_PRODUCT_KEY_SECRET: unused

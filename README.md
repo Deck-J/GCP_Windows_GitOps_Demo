@@ -11,18 +11,61 @@ a GitOps blue/green deployment workflow for two managed instance groups.
 
 ```mermaid
 flowchart TD
-    A["App change on main"] --> B["Cloud Build image pipeline"]
-    B --> C["Immutable Windows image"]
-    C --> D["Promotion pull request"]
-    D --> E["Production manifest merge"]
-    E --> F["Reconcile inactive MIG"]
-    F --> G["IIS health validation"]
-    G --> DX{"Dynatrace enabled?"}
-    DX -- "No" --> H["Load balancer traffic switch"]
-    DX -- "Yes" --> DY["Install and validate OneAgent"]
-    DY --> H
-    H --> I["10-minute validation window"]
-    I --> J["Automatic runtime teardown"]
+  A["App change and VERSION change on main"] --> B["Cloud Build image pipeline"]
+  B --> C["Validate version, encode project files and hooks"]
+  C --> D["Create temporary Windows builder VM\nfrom windows-2022 source image"]
+  D --> P0
+
+  subgraph WIN["Temporary Windows builder VM - bootstrap.ps1"]
+    direction TD
+    P0["Read VM metadata and prepare C:\\ImageBuild"]
+    P0 --> P1["PowerShell stage 1/9\nInstall IIS and publish versioned app\nindex.html, health.html, version.json"]
+    P1 --> P2["PowerShell stage 2/9\nDownload and silently install Git for Windows"]
+    P2 --> P3["PowerShell stage 3/9\nInstall pinned .NET 7.0.410 SDK"]
+    P3 --> P4["PowerShell stage 4/9\nInstall .NET 8 SDK and update machine PATH"]
+    P4 --> P5["PowerShell stage 5/9\nInstall Visual Studio 2022"]
+    P5 --> P5A{"Installation mode?"}
+    P5A -- "web-buildtools" --> P5B["Download VS Build Tools\ninstall MSBuild and .NET web workload"]
+    P5A -- "offline-iso" --> P5C["Read ISO from restricted GCS\nmount media and locate edition bootstrapper"]
+    P5C --> P5D["Read product key from Secret Manager\nwhen Enterprise or Professional"]
+    P5D --> P5E["Install from mounted media\nthen dismount ISO"]
+    P5A -- "disabled" --> P5F["Record Visual Studio skipped"]
+    P5B --> P5G["Validate MSBuild and, for full IDE modes, devenv.exe"]
+    P5E --> P5G
+    P5F --> P6
+    P5G --> P6["PowerShell stage 6/9\nRun project setup and validation hooks\nor compile and execute SevenDemo"]
+    P6 --> P7["PowerShell stage 7/9\nDownload and stage pinned GitHub Actions runner\nwithout registration credentials"]
+    P7 --> P8["PowerShell stage 8/9\nCheck IIS, Git, .NET, runner, VS metadata,\nproject proof and HTTP health endpoint"]
+    P8 --> P9["PowerShell stage 9/9\nDelete temporary files and run GCE Sysprep"]
+  end
+
+  P9 --> Q["IMAGE_BUILD_COMPLETE\nwait for builder VM shutdown"]
+  Q --> R["Capture immutable Compute Engine image"]
+  R --> S
+
+  subgraph SMOKE["Temporary smoke-test VM - smoke-test.ps1"]
+    direction TD
+    S["Boot from captured image"] --> S1["Smoke stage 1/4\nVerify IIS, app files, tools and image proof"]
+    S1 --> S2["Smoke stage 2/4\nRun Git, dotnet --info and MSBuild checks"]
+    S2 --> S3["Smoke stage 3/4\nExecute compiled SevenDemo when enabled"]
+    S3 --> S4["Smoke stage 4/4\nRequest IIS health endpoint"]
+    S4 --> S5["SMOKE_TEST_PASS\nshutdown smoke-test VM"]
+  end
+
+  S5 --> T["Publish IMAGE_NAME and IMAGE_FAMILY\nremove temporary build resources"]
+  T --> U["Open promotion pull request\nwith immutable image and app version"]
+  U --> V["Merge reviewed production manifest"]
+  V --> W["Read ACTIVE_COLOR and target image\nfrom environments/prod/deployment.env"]
+  W --> X["Reconcile firewall, health check\nand backend service"]
+  X --> Y["Create immutable instance template\nand reconcile target MIG"]
+  Y --> Z["Wait for stable instances and IIS health"]
+  Z --> DX{"Dynatrace enabled?"}
+  DX -- "No" --> H["Set target backend capacity to 1\nand inactive backend to 0"]
+  DX -- "Yes" --> DY["Install OneAgent on runtime VMs\nwait for DYNATRACE_READY on every VM"]
+  DY --> H
+  H --> I["Publish HTTP load-balancer endpoint"]
+  I --> J["10-minute viewing and validation window"]
+  J --> K["Teardown both MIGs, templates, disks,\nload balancer and demo firewall"]
 ```
 
 Git is the source of truth. The file `environments/prod/deployment.env` records
@@ -55,8 +98,8 @@ at that project. The framework folders should remain unchanged.
 - Git for Windows
 - Pinned .NET 7.0.410 SDK for the demonstration project
 - .NET 8 SDK for current runner compatibility
-- Visual Studio 2022 Build Tools, or a licensed full Visual Studio 2022 edition
-  installed from mounted offline media
+- Visual Studio 2022 Community installed from Microsoft's web installer, or a
+  licensed full Visual Studio 2022 edition installed from mounted offline media
 - Pinned GitHub Actions runner binaries (not registered)
 - Versioned static IIS application from `projects/sample/src`
 - Repository-stored `SevenDemo` project targeting .NET 7 and C# 7.0
@@ -82,39 +125,36 @@ Register each runner at instance startup with a short-lived token.
 
 ## Run it
 
-The default mode is the mounted Visual Studio 2022 Community ISO demonstration.
-Complete the media and service-account setup below, then run the documented
-full build command. To run the smaller Build Tools path instead:
+The default mode installs the full Visual Studio 2022 Community IDE directly
+from Microsoft's web installer, so no ISO, media bucket, product key, or
+builder service account is required. To run the image build:
 
 ```bash
 gcloud builds submit \
   --config=pipelines/cloudbuild-image.yaml \
-  --substitutions=_ZONE=us-east1-b,_RUNNER_VERSION=2.328.0,_VS_INSTALL_MODE=web-buildtools \
+  --substitutions=_ZONE=us-east1-b,_RUNNER_VERSION=2.328.0,_VS_INSTALL_MODE=web-community \
   .
 ```
 
-## GitHub Codespaces quick start
+## Local environment setup
 
-The repository includes `.devcontainer/devcontainer.json`, so Codespaces opens
-with the Google Cloud CLI, GitHub CLI, PowerShell, ShellCheck, YAML validation,
-ZIP tools and the recommended VS Code extensions already available. The
-Codespace is the Linux control plane; Cloud Build creates the temporary Windows
-VMs in GCP.
+This repository is designed to run from a local Linux/macOS shell or a
+supported development environment with the Google Cloud CLI and GitHub CLI
+installed. The control plane runs locally while Cloud Build creates the
+temporary Windows VMs in GCP.
 
 1. Extract this repository, create a GitHub repository from its contents and
    push the `main` branch.
-2. In GitHub, select **Code**, **Codespaces**, **Create codespace on main**.
-3. Wait for the post-create check to report `Codespace ready`.
-4. Authenticate your own GCP identity without writing credentials into Git:
+2. Authenticate your own GCP identity without writing credentials into Git:
 
    ```bash
    gcloud auth login --no-launch-browser
    ```
 
-5. Configure and check the selected project:
+3. Configure and check the selected project:
 
    ```bash
-  ./framework/bootstrap/configure-codespace.sh PROJECT_ID us-central1-a
+   ./framework/bootstrap/configure-codespace.sh PROJECT_ID us-central1-a
    ```
 
    The script creates an isolated local gcloud configuration, verifies project
@@ -122,25 +162,20 @@ VMs in GCP.
    command when action is required. It does not enable services or change IAM
    automatically.
 
-6. Run the full repository validation at any time:
+4. Run the full repository validation at any time:
 
    ```bash
-  ./framework/validation/validate-repository.sh
+   ./framework/validation/validate-repository.sh
    ```
 
-   The same commands are available through **Terminal > Run Task** as
-   `Demo: Configure Codespace` and `Demo: Validate Repository`.
-
-7. Configure the GitHub repository variables printed by
-   `configure-codespace.sh`. GitHub Actions authenticates to GCP through
-   Workload Identity Federation; do not add a downloaded service-account JSON
-   key to the Codespace or repository.
+5. Configure the GitHub repository variables printed by the bootstrap script.
+   GitHub Actions authenticates to GCP through Workload Identity Federation; do
+   not add a downloaded service-account JSON key to the repository.
 
 ### Bootstrap GitHub Actions authentication
 
 The first GitHub Actions run needs a one-time trust relationship between the
-repository and GCP. Run this from the Codespace after `gcloud auth login` and
-`gh auth login`:
+repository and GCP. Run this after `gcloud auth login` and `gh auth login`:
 
 ```bash
 ./framework/bootstrap/bootstrap-github-actions.sh PROJECT_ID us-central1-a
@@ -191,22 +226,29 @@ IIS, Visual Studio, .NET, and SevenDemo. Custom mode does not require the sample
 HTML or SevenDemo files; it requires the project hooks and a reachable health
 endpoint after setup.
 
-The Visual Studio offline ISO cannot be created in the Linux Codespace because
+The Visual Studio offline ISO cannot be created in a Linux-based shell because
 the included media-building script uses Windows ADK `oscdimg.exe`. Create that
 ISO once on a Windows administration machine, upload it to the restricted GCS
-bucket, and then perform every remaining build and deployment operation from
-Codespaces.
+bucket, and then perform the remaining build and deployment operations from the
+configured environment.
 
 The application version supplied to Cloud Build must match `projects/sample/VERSION`.
 Application HTML is encoded into temporary VM metadata and installed into IIS;
 the resulting image is named deterministically from the version and Git commit.
 
-## Visual Studio 2022 offline-install demonstration
+## Visual Studio 2022 installation modes
 
-The default `offline-iso` mode installs Visual Studio 2022 Community. The
-`web-buildtools` mode remains available for a smaller build-runner image.
-Enterprise and Professional media are also supported when a licensed-key
-demonstration is required.
+The default `web-community` mode downloads the Visual Studio 2022 Community
+bootstrapper and installs the components in `projects/sample/config/vs2022.vsconfig`.
+It installs the full IDE, including `devenv.exe`, and is the recommended path
+when an ISO is not available. It requires outbound HTTPS from the temporary
+Windows builder VM.
+
+The `web-buildtools` mode remains available when only MSBuild is needed.
+
+The optional `offline-iso` mode installs a full Visual Studio 2022 edition from
+approved media when a full IDE demonstration is required. Enterprise and
+Professional media additionally require a licensed product key.
 
 ```text
 Restricted GCS bucket
@@ -357,7 +399,7 @@ flowchart TD
 ```
 
 Create an access token in Dynatrace with only the `InstallerDownload` scope.
-Then run the interactive setup from Codespaces:
+Then run the interactive setup from your authenticated shell:
 
 ```bash
 ./integrations/dynatrace/setup-dynatrace.sh \

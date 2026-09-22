@@ -36,7 +36,7 @@ jobs:
 
       - name: 4/5 Build and validate immutable Windows image
         env:
-          VS_INSTALL_MODE: ${{ vars.VS_INSTALL_MODE || 'offline-iso' }}
+          VS_INSTALL_MODE: ${{ vars.VS_INSTALL_MODE || 'web-community' }}
           VS_EDITION: ${{ vars.VS_EDITION || 'community' }}
           VS_MEDIA_URI: ${{ vars.VS_MEDIA_URI || 'gs://unused/vs2022-community-layout.iso' }}
           VS_PRODUCT_KEY_SECRET: ${{ vars.VS_PRODUCT_KEY_SECRET || 'unused' }}

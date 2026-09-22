@@ -52,7 +52,7 @@ try {
             $msbuild = Join-Path $vs.installPath 'MSBuild\Current\Bin\MSBuild.exe'
             if (-not (Test-Path $msbuild)) { throw 'MSBuild validation failed in the smoke-test VM' }
             & $msbuild -version
-            if ($vs.mode -eq 'offline-iso') {
+            if ($vs.mode -in @('web-community', 'offline-iso')) {
                 $devenv = Join-Path $vs.installPath 'Common7\IDE\devenv.exe'
                 if (-not (Test-Path $devenv)) { throw 'Visual Studio IDE validation failed in the smoke-test VM' }
                 Write-DemoPass 'Visual Studio IDE' 'devenv.exe is present'

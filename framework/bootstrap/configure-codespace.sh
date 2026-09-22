@@ -87,11 +87,11 @@ GitHub Actions additionally requires these repository variables:
   GCP_ZONE=$ZONE
   GCP_WIF_PROVIDER=<workload-identity-provider-resource-name>
   GCP_SERVICE_ACCOUNT=<github-actions-service-account-email>
-  VS_INSTALL_MODE=offline-iso
+  VS_INSTALL_MODE=web-community
   VS_EDITION=community
-  VS_MEDIA_URI=gs://<restricted-bucket>/vs2022-community-layout.iso
+  VS_MEDIA_URI=gs://unused/vs2022-community-layout.iso
   VS_PRODUCT_KEY_SECRET=unused
-  BUILDER_SERVICE_ACCOUNT=<windows-image-builder-service-account-email>
+  BUILDER_SERVICE_ACCOUNT=unused
 
 Optional Dynatrace repository variables:
   DYNATRACE_ENABLED=false
