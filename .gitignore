@@ -1,0 +1,16 @@
+# Local authentication and environment files
+.env
+.env.*
+!.env.example
+application_default_credentials.json
+service-account*.json
+
+# Large installation media and build output
+*.iso
+*.log
+*.zip
+
+# Tool state
+.terraform/
+*.tfstate
+*.tfstate.*

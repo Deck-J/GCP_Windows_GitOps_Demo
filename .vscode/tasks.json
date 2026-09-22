@@ -1,0 +1,50 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Demo: Configure Codespace",
+      "type": "shell",
+      "command": "./framework/bootstrap/configure-codespace.sh ${input:gcpProject} ${input:gcpZone}",
+      "problemMatcher": []
+    },
+    {
+      "label": "Demo: Configure Optional Dynatrace",
+      "type": "shell",
+      "command": "./integrations/dynatrace/setup-dynatrace.sh ${input:gcpProject} ${input:dynatraceUrl} dynatrace-installer-token dynatrace-demo-runtime ${input:cloudBuildServiceAccount}",
+      "problemMatcher": []
+    },
+    {
+      "label": "Demo: Validate Repository",
+      "type": "shell",
+      "command": "./framework/validation/validate-repository.sh",
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "gcpProject",
+      "type": "promptString",
+      "description": "GCP project ID"
+    },
+    {
+      "id": "gcpZone",
+      "type": "promptString",
+      "description": "GCP zone",
+      "default": "us-central1-a"
+    },
+    {
+      "id": "dynatraceUrl",
+      "type": "promptString",
+      "description": "Dynatrace environment URL"
+    },
+    {
+      "id": "cloudBuildServiceAccount",
+      "type": "promptString",
+      "description": "Cloud Build service account email"
+    }
+  ]
+}

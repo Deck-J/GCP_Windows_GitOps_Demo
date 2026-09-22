@@ -1,0 +1,24 @@
+<!doctype html>
+<!-- Static IIS validation page. bootstrap.ps1 injects the application version and source revision. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Windows Runner Demo</title>
+  <style>
+    body{font-family:Segoe UI,Arial,sans-serif;background:#f4f7fb;color:#172033;margin:0;display:grid;place-items:center;min-height:100vh}
+    main{background:#fff;border:1px solid #dbe3ef;border-radius:16px;padding:42px;box-shadow:0 12px 35px #1d35571a;max-width:650px}
+    h1{margin-top:0;color:#2368c4}.badge{display:inline-block;background:#e9f7ef;color:#167344;border-radius:999px;padding:6px 12px;font-weight:600}
+    code{background:#eef2f7;padding:3px 7px;border-radius:5px}
+  </style>
+</head>
+<body>
+  <main>
+    <span class="badge">Healthy</span>
+    <h1>GCP Blue/Green IIS Demo</h1>
+    <p>This page is served from an immutable Windows Compute Engine image.</p>
+    <p>Application version: <code>__APP_VERSION__</code></p>
+    <p>Source revision: <code>__SOURCE_REVISION__</code></p>
+  </main>
+</body>
+</html>

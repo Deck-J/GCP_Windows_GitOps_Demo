@@ -1,0 +1,43 @@
+# Cloud Build entry point for the immutable Windows runner image pipeline.
+# The orchestration script creates the builder VM, captures an image, smoke-tests it, and cleans up.
+timeout: 7200s
+
+steps:
+  - id: build-and-test-windows-image
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - framework/image/orchestrate.sh
+      - $PROJECT_ID
+      - ${_ZONE}
+      - ${_SOURCE_IMAGE_FAMILY}
+      - ${_IMAGE_FAMILY}
+      - $BUILD_ID
+      - ${_RUNNER_VERSION}
+      - ${_VS_INSTALL_MODE}
+      - ${_KEEP_FAILED_VM}
+      - ${_APP_VERSION}
+      - ${_SOURCE_REVISION}
+      - ${_VS_EDITION}
+      - ${_VS_MEDIA_URI}
+      - ${_VS_PRODUCT_KEY_SECRET}
+      - ${_BUILDER_SERVICE_ACCOUNT}
+
+substitutions:
+  _ZONE: us-central1-a
+  _SOURCE_IMAGE_FAMILY: windows-2022
+  _IMAGE_FAMILY: windows-github-runner
+  _RUNNER_VERSION: 2.328.0
+  # web-buildtools keeps the sample runnable without licensed media.
+  # Use offline-iso to demonstrate mounting and licensing full Visual Studio.
+  _VS_INSTALL_MODE: offline-iso
+  _VS_EDITION: community
+  _VS_MEDIA_URI: gs://replace-me/vs2022-community-layout.iso
+  _VS_PRODUCT_KEY_SECRET: unused
+  _BUILDER_SERVICE_ACCOUNT: unused
+  _KEEP_FAILED_VM: "false"
+  _APP_VERSION: 1.0.0
+  _SOURCE_REVISION: local
+
+options:
+  logging: CLOUD_LOGGING_ONLY

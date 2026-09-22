@@ -1,0 +1,38 @@
+# Cloud Build entry point for the temporary blue/green application demonstration.
+# run-demo.sh validates the desired image, publishes traffic, waits, and always attempts teardown.
+timeout: 3600s
+
+steps:
+  - id: run-validate-and-teardown-demo
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - framework/deploy/run-demo.sh
+      - $PROJECT_ID
+      - ${_ZONE}
+      - ${_APP_NAME}
+      - ${_MIG_SIZE}
+      - ${_TEARDOWN_DELAY_SECONDS}
+      - ${_DYNATRACE_ENABLED}
+      - ${_DYNATRACE_ENVIRONMENT_URL}
+      - ${_DYNATRACE_TOKEN_SECRET}
+      - ${_DYNATRACE_RUNTIME_SERVICE_ACCOUNT}
+      - ${_DYNATRACE_MONITORING_MODE}
+      - ${_DYNATRACE_HOST_GROUP}
+      - ${_DYNATRACE_NETWORK_ZONE}
+
+substitutions:
+  _ZONE: us-central1-a
+  _APP_NAME: iis-demo
+  _MIG_SIZE: "2"
+  _TEARDOWN_DELAY_SECONDS: "600"
+  _DYNATRACE_ENABLED: "false"
+  _DYNATRACE_ENVIRONMENT_URL: "disabled"
+  _DYNATRACE_TOKEN_SECRET: "disabled"
+  _DYNATRACE_RUNTIME_SERVICE_ACCOUNT: "disabled"
+  _DYNATRACE_MONITORING_MODE: "fullstack"
+  _DYNATRACE_HOST_GROUP: "gcp-windows-demo"
+  _DYNATRACE_NETWORK_ZONE: "disabled"
+
+options:
+  logging: CLOUD_LOGGING_ONLY

@@ -1,0 +1,132 @@
+name: Build IIS application image
+
+# GitHub is the change trigger and promotion author. Cloud Build performs the privileged
+# Windows work after this job authenticates with short-lived OIDC credentials.
+on:
+  push:
+    branches: [main]
+    paths:
+      - projects/sample/**
+      - framework/image/**
+      - pipelines/cloudbuild-image.yaml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  build-and-propose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 1/5 Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 2/5 Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: 3/5 Configure Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: 4/5 Build and validate immutable Windows image
+        env:
+          VS_INSTALL_MODE: ${{ vars.VS_INSTALL_MODE || 'offline-iso' }}
+          VS_EDITION: ${{ vars.VS_EDITION || 'community' }}
+          VS_MEDIA_URI: ${{ vars.VS_MEDIA_URI || 'gs://unused/vs2022-community-layout.iso' }}
+          VS_PRODUCT_KEY_SECRET: ${{ vars.VS_PRODUCT_KEY_SECRET || 'unused' }}
+          BUILDER_SERVICE_ACCOUNT: ${{ vars.BUILDER_SERVICE_ACCOUNT || 'unused' }}
+        shell: bash
+        run: |
+          # Submit the long-running Windows build to Cloud Build and preserve its result in the summary.
+          set -Eeuo pipefail
+          VERSION_FILE="$(jq -r '.versionFile // "projects/sample/VERSION"' projects/sample/project.json)"
+          APP_VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
+          VERSION_TOKEN="$(printf '%s' "$APP_VERSION" | tr '[:upper:].+_' '[:lower:]---' | tr -cd 'a-z0-9-')"
+          IMAGE="windows-github-runner-${VERSION_TOKEN}-${GITHUB_SHA:0:12}"
+          BUILD_STATUS=0
+          REUSED=false
+
+          if gcloud compute images describe "$IMAGE" --project="${{ vars.GCP_PROJECT_ID }}" >/dev/null 2>&1; then
+            REUSED=true
+            echo "::notice title=Image already validated::Reusing immutable image $IMAGE"
+          else
+            echo "::group::Cloud Build - Windows, IIS, Visual Studio, .NET and smoke tests"
+            set +e
+            gcloud builds submit \
+              --project="${{ vars.GCP_PROJECT_ID }}" \
+              --config=pipelines/cloudbuild-image.yaml \
+              --substitutions="_ZONE=${{ vars.GCP_ZONE }},_APP_VERSION=${APP_VERSION},_SOURCE_REVISION=${GITHUB_SHA},_VS_INSTALL_MODE=${VS_INSTALL_MODE},_VS_EDITION=${VS_EDITION},_VS_MEDIA_URI=${VS_MEDIA_URI},_VS_PRODUCT_KEY_SECRET=${VS_PRODUCT_KEY_SECRET},_BUILDER_SERVICE_ACCOUNT=${BUILDER_SERVICE_ACCOUNT}" \
+              . 2>&1 | tee cloud-build-image.log
+            BUILD_STATUS=${PIPESTATUS[0]}
+            set -e
+            echo "::endgroup::"
+          fi
+
+          if [[ "$BUILD_STATUS" -eq 0 ]]; then RESULT='Passed'; else RESULT='Failed'; fi
+          {
+            echo '## Windows image build'
+            echo
+            echo '| Item | Result |'
+            echo '| --- | --- |'
+            echo "| Pipeline | ${RESULT} |"
+            echo "| Application version | ${APP_VERSION} |"
+            echo "| Image | ${IMAGE} |"
+            echo "| Visual Studio | 2022 ${VS_EDITION} (${VS_INSTALL_MODE}) |"
+            echo "| Reused existing image | ${REUSED} |"
+            echo "| IIS validation | Included in image build and smoke test |"
+            echo "| SevenDemo | .NET 7 / C# 7 compilation and execution |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$BUILD_STATUS" -ne 0 ]]; then
+            echo "::error title=Windows image build failed::Review the numbered Cloud Build stages above for the failing component."
+            exit "$BUILD_STATUS"
+          fi
+          echo "::notice title=Windows image ready::$IMAGE passed image and smoke-test validation."
+
+      - name: 5/5 Propose inactive color
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          # Update only the inactive color, push a review branch, and let the promotion PR be the gate.
+          set -Eeuo pipefail
+          VERSION_FILE="$(jq -r '.versionFile // "projects/sample/VERSION"' projects/sample/project.json)"
+          APP_VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
+          VERSION_TOKEN="$(printf '%s' "$APP_VERSION" | tr '[:upper:].+_' '[:lower:]---' | tr -cd 'a-z0-9-')"
+          SHORT_SHA="${GITHUB_SHA:0:12}"
+          IMAGE="windows-github-runner-${VERSION_TOKEN}-${SHORT_SHA}"
+
+          # shellcheck disable=SC1091
+          source environments/prod/deployment.env
+          if [[ "$ACTIVE_COLOR" == "blue" ]]; then TARGET=green; else TARGET=blue; fi
+
+          sed -i "s/^ACTIVE_COLOR=.*/ACTIVE_COLOR=${TARGET}/" environments/prod/deployment.env
+          sed -i "s/^${TARGET^^}_IMAGE=.*/${TARGET^^}_IMAGE=${IMAGE}/" environments/prod/deployment.env
+          sed -i "s/^${TARGET^^}_VERSION=.*/${TARGET^^}_VERSION=${APP_VERSION}/" environments/prod/deployment.env
+
+          BRANCH="promote/iis-${APP_VERSION}-${SHORT_SHA}"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git switch -c "$BRANCH"
+          git add environments/prod/deployment.env
+          git commit -m "Promote IIS ${APP_VERSION} to ${TARGET}"
+          git push --set-upstream origin "$BRANCH"
+          PR_URL="$(gh pr create \
+            --title "Promote IIS ${APP_VERSION} to ${TARGET}" \
+            --body "Promotes immutable image ${IMAGE}. Merge switches traffic after health validation; revert rolls back." \
+            --base main --head "$BRANCH")"
+          echo "::notice title=Promotion ready::${TARGET} promotion pull request created: ${PR_URL}"
+          {
+            echo
+            echo '## GitOps promotion'
+            echo
+            echo "- Target color: **${TARGET}**"
+            echo "- Version: **${APP_VERSION}**"
+            echo "- Pull request: ${PR_URL}"
+          } >> "$GITHUB_STEP_SUMMARY"

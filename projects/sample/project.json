@@ -1,0 +1,8 @@
+{
+  "mode": "sample",
+  "versionFile": "projects/sample/VERSION",
+  "setupScript": "projects/sample/setup.ps1",
+  "validateScript": "projects/sample/validate.ps1",
+  "healthPath": "/health.html",
+  "healthPort": 80
+}
