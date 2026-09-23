@@ -20,21 +20,41 @@ jobs:
   build-and-propose:
     runs-on: ubuntu-latest
     steps:
-      - name: 1/5 Checkout repository
+      - name: 1/6 Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: 2/5 Authenticate to Google Cloud
+      - name: Check required repository configuration
+        id: check-configuration
+        shell: bash
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          GCP_ZONE: ${{ vars.GCP_ZONE }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+        run: |
+          set -Eeuo pipefail
+          missing=()
+          for name in GCP_PROJECT_ID GCP_ZONE GCP_WIF_PROVIDER GCP_SERVICE_ACCOUNT; do
+            [[ -n "${!name}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing GitHub repository variables: %s\n' "${missing[*]}" >&2
+            printf 'Run the one-time administrator bootstrap, then rerun this workflow.\n' >&2
+            exit 1
+          fi
+
+      - name: 2/6 Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
 
-      - name: 3/5 Configure Google Cloud CLI
+      - name: 3/6 Configure Google Cloud CLI
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: 4/5 Build and validate immutable Windows image
+      - name: 4/6 Build and validate immutable Windows image
         env:
           VS_INSTALL_MODE: ${{ vars.VS_INSTALL_MODE || 'web-community' }}
           VS_EDITION: ${{ vars.VS_EDITION || 'community' }}
@@ -89,7 +109,7 @@ jobs:
           fi
           echo "::notice title=Windows image ready::$IMAGE passed image and smoke-test validation."
 
-      - name: 5/5 Propose inactive color
+      - name: 5/6 Propose inactive color
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash

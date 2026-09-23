@@ -25,19 +25,38 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - name: 1/4 Checkout reviewed desired state
+      - name: 1/5 Checkout reviewed desired state
         uses: actions/checkout@v4
 
-      - name: 2/4 Authenticate to Google Cloud
+      - name: Check required repository configuration
+        shell: bash
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          GCP_ZONE: ${{ vars.GCP_ZONE }}
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+        run: |
+          set -Eeuo pipefail
+          missing=()
+          for name in GCP_PROJECT_ID GCP_ZONE GCP_WIF_PROVIDER GCP_SERVICE_ACCOUNT; do
+            [[ -n "${!name}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing GitHub repository variables: %s\n' "${missing[*]}" >&2
+            printf 'Run the one-time administrator bootstrap, then rerun this workflow.\n' >&2
+            exit 1
+          fi
+
+      - name: 2/5 Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
 
-      - name: 3/4 Configure Google Cloud CLI
+      - name: 3/5 Configure Google Cloud CLI
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: 4/4 Deploy, validate, display and tear down demo
+      - name: 4/5 Deploy, validate, display and tear down demo
         shell: bash
         run: |
           # Cloud Build owns resource creation and cleanup; this job records the public result in its summary.

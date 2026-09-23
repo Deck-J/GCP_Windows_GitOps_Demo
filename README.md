@@ -1,72 +1,89 @@
 # GCP Windows image and GitOps blue/green pipeline
 
 This repository builds a Windows Server 2022 Compute Engine image without
-Packer. Cloud Build creates a temporary VM, provisions it with a PowerShell
-metadata startup script, waits for a serial-console completion marker and
-Sysprep shutdown, creates a versioned image, boots a smoke-test VM, and cleans
-up temporary resources. It also contains a versioned IIS demo application and
-a GitOps blue/green deployment workflow for two managed instance groups.
+Packer. The GitHub Actions workflow runs on a GitHub-hosted Linux runner and
+orchestrates the build via OIDC authentication to Google Cloud. It does not
+compile or install Windows software on the GitHub runner itself. Instead,
+Cloud Build creates a temporary Windows VM in GCP, uses a minimal PowerShell
+metadata startup script to bootstrap OpenSSH, then provisions and smoke-tests
+it over an ephemeral Ed25519 SSH key through IAP. It creates a versioned image
+and cleans up temporary resources. It also contains a versioned IIS demo
+application and a GitOps blue/green deployment workflow for two managed
+instance groups.
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-  A["App change and VERSION change on main"] --> B["Cloud Build image pipeline"]
-  B --> C["Validate version, encode project files and hooks"]
-  C --> D["Create temporary Windows builder VM\nfrom windows-2022 source image"]
-  D --> P0
+  classDef linux fill:#eaf2ff,stroke:#2357a6,stroke-width:2px,color:#111;
+  classDef windows fill:#eafaf1,stroke:#216e3a,stroke-width:2px,color:#111;
+  classDef gcp fill:#fff5e6,stroke:#b05a00,stroke-width:2px,color:#111;
 
-  subgraph WIN["Temporary Windows builder VM - bootstrap.ps1"]
+  subgraph GH["GitHub-hosted runner: Linux orchestration only"]
+    direction TB
+    A["Code change on main"]:::linux --> B["GitHub Actions on ubuntu-latest\nOIDC auth to GCP"]:::linux
+    B --> C["Submit Cloud Build pipeline"]:::linux
+  end
+
+  C --> D["Cloud Build creates Windows builder VM in GCP"]:::gcp
+  D --> P0["Startup script enables OpenSSH and authorizes temp key"]:::windows
+
+  subgraph WIN["Windows builder VM: runs the image build and smoke tests"]
     direction TD
-    P0["Read VM metadata and prepare C:\\ImageBuild"]
-    P0 --> P1["PowerShell stage 1/9\nInstall IIS and publish versioned app\nindex.html, health.html, version.json"]
-    P1 --> P2["PowerShell stage 2/9\nDownload and silently install Git for Windows"]
-    P2 --> P3["PowerShell stage 3/9\nInstall pinned .NET 7.0.410 SDK"]
-    P3 --> P4["PowerShell stage 4/9\nInstall .NET 8 SDK and update machine PATH"]
-    P4 --> P5["PowerShell stage 5/9\nInstall Visual Studio 2022"]
-    P5 --> P5A{"Installation mode?"}
-    P5A -- "web-buildtools" --> P5B["Download VS Build Tools\ninstall MSBuild and .NET web workload"]
-    P5A -- "offline-iso" --> P5C["Read ISO from restricted GCS\nmount media and locate edition bootstrapper"]
-    P5C --> P5D["Read product key from Secret Manager\nwhen Enterprise or Professional"]
-    P5D --> P5E["Install from mounted media\nthen dismount ISO"]
-    P5A -- "disabled" --> P5F["Record Visual Studio skipped"]
-    P5B --> P5G["Validate MSBuild and, for full IDE modes, devenv.exe"]
+    P0 --> P0A["Copy bootstrap.ps1 over SSH"]:::windows
+    P0A --> P1["PowerShell stage 1/9\nInstall IIS and publish app"]:::windows
+    P1 --> P2["PowerShell stage 2/9\nInstall Git for Windows"]:::windows
+    P2 --> P3["PowerShell stage 3/9\nInstall pinned .NET 7 SDK"]:::windows
+    P3 --> P4["PowerShell stage 4/9\nInstall .NET 8 SDK"]:::windows
+    P4 --> P5["PowerShell stage 5/9\nInstall Visual Studio 2022"]:::windows
+    P5 --> P5A{"Installation mode?"}:::windows
+    P5A -- "web-buildtools" --> P5B["Install VS Build Tools"]:::windows
+    P5A -- "offline-iso" --> P5C["Install from mounted ISO"]:::windows
+    P5C --> P5D["Read product key from Secret Manager"]:::windows
+    P5D --> P5E["Complete install and dismount ISO"]:::windows
+    P5A -- "disabled" --> P5F["Skip VS install"]:::windows
+    P5B --> P5G["Validate MSBuild and devenv.exe"]:::windows
     P5E --> P5G
     P5F --> P6
-    P5G --> P6["PowerShell stage 6/9\nRun project setup and validation hooks\nor compile and execute SevenDemo"]
-    P6 --> P7["PowerShell stage 7/9\nDownload and stage pinned GitHub Actions runner\nwithout registration credentials"]
-    P7 --> P8["PowerShell stage 8/9\nCheck IIS, Git, .NET, runner, VS metadata,\nproject proof and HTTP health endpoint"]
-    P8 --> P9["PowerShell stage 9/9\nDelete temporary files and run GCE Sysprep"]
+    P5G --> P6["PowerShell stage 6/9\nRun project setup and validation hooks"]:::windows
+    P6 --> P7["PowerShell stage 7/9\nStage pinned GitHub Actions runner binaries"]:::windows
+    P7 --> P8["PowerShell stage 8/9\nVerify installed tools and HTTP health"]:::windows
+    P8 --> P9["PowerShell stage 9/9\nSysprep and shut down VM"]:::windows
   end
 
-  P9 --> Q["IMAGE_BUILD_COMPLETE\nwait for builder VM shutdown"]
-  Q --> R["Capture immutable Compute Engine image"]
-  R --> S
+  P9 --> Q["Capture immutable Windows image"]:::gcp
+  Q --> S["Boot smoke-test VM from captured image"]:::windows
 
-  subgraph SMOKE["Temporary smoke-test VM - smoke-test.ps1"]
+  subgraph SMOKE["Smoke-test VM: Windows validation only"]
     direction TD
-    S["Boot from captured image"] --> S1["Smoke stage 1/4\nVerify IIS, app files, tools and image proof"]
-    S1 --> S2["Smoke stage 2/4\nRun Git, dotnet --info and MSBuild checks"]
-    S2 --> S3["Smoke stage 3/4\nExecute compiled SevenDemo when enabled"]
-    S3 --> S4["Smoke stage 4/4\nRequest IIS health endpoint"]
-    S4 --> S5["SMOKE_TEST_PASS\nshutdown smoke-test VM"]
+    S --> S1["Smoke stage 1/4\nVerify IIS, app files and image proof"]:::windows
+    S1 --> S2["Smoke stage 2/4\nRun Git, dotnet and MSBuild checks"]:::windows
+    S2 --> S3["Smoke stage 3/4\nExecute SevenDemo when enabled"]:::windows
+    S3 --> S4["Smoke stage 4/4\nRequest IIS health endpoint"]:::windows
+    S4 --> S5["SMOKE_TEST_PASS"]:::windows
   end
 
-  S5 --> T["Publish IMAGE_NAME and IMAGE_FAMILY\nremove temporary build resources"]
-  T --> U["Open promotion pull request\nwith immutable image and app version"]
-  U --> V["Merge reviewed production manifest"]
-  V --> W["Read ACTIVE_COLOR and target image\nfrom environments/prod/deployment.env"]
-  W --> X["Reconcile firewall, health check\nand backend service"]
-  X --> Y["Create immutable instance template\nand reconcile target MIG"]
-  Y --> Z["Wait for stable instances and IIS health"]
-  Z --> DX{"Dynatrace enabled?"}
-  DX -- "No" --> H["Set target backend capacity to 1\nand inactive backend to 0"]
-  DX -- "Yes" --> DY["Install OneAgent on runtime VMs\nwait for DYNATRACE_READY on every VM"]
+  S5 --> T["Publish image metadata\nremove temporary build resources"]:::gcp
+  T --> U["Open promotion PR"]:::linux
+  U --> V["Merge reviewed production manifest"]:::linux
+  V --> W["Read ACTIVE_COLOR and target image\nfrom deployment.env"]:::linux
+  W --> X["Reconcile firewall, health check\nand backend service"]:::gcp
+  X --> Y["Create immutable template\nand reconcile target MIG"]:::gcp
+  Y --> Z["Wait for stable instances\nand IIS health"]:::gcp
+  Z --> DX{"Dynatrace enabled?"}:::gcp
+  DX -- "No" --> H["Set target backend capacity to 1"]:::gcp
+  DX -- "Yes" --> DY["Install OneAgent on runtime VMs"]:::gcp
   DY --> H
-  H --> I["Publish HTTP load-balancer endpoint"]
-  I --> J["10-minute viewing and validation window"]
-  J --> K["Teardown both MIGs, templates, disks,\nload balancer and demo firewall"]
+  H --> I["Publish HTTP load-balancer endpoint"]:::gcp
+  I --> J["10-minute viewing and validation window"]:::gcp
+  J --> K["Teardown both MIGs, disks, templates\nand load balancer"]:::gcp
 ```
+
+Important: the Linux runner is only the GitHub Actions control plane. The actual Windows image build, installation, and smoke testing happen inside the temporary Windows Virtual Machine created by Cloud Build in GCP.
+
+Note: the GitHub Actions job itself is Linux. The actual Windows image build,
+Windows application install, and smoke tests run inside temporary GCP Windows
+VMs launched by Cloud Build.
 
 Git is the source of truth. The file `environments/prod/deployment.env` records
 the desired active color plus the immutable image and application version for
@@ -82,21 +99,14 @@ directory:
 ```text
 framework/             Reusable bootstrap, image, deployment, and validation code
 pipelines/             Cloud Build entry points
-projects/sample/       Sample application, version, setup hook, and validation hook
-integrations/          Optional runtime integrations such as Dynatrace
-environments/          GitOps desired deployment state
+The default mode installs the full Visual Studio 2022 Community IDE directly from Microsoft's web installer, so no ISO, media bucket, product key, or builder service account is required. After the one-time trust setup below, validation, image builds, promotion pull requests, deployment, viewing, and teardown all run from GitHub Actions. No local `gcloud` or `gh` command is part of the normal operating flow.
 docs/                  Architecture and operating documentation
-```
-
-For another application, copy `projects/sample/` to a project-specific folder,
-replace its setup and validation hooks, and point the framework configuration
-at that project. The framework folders should remain unchanged.
-
+The repository's `Validate repository` workflow runs on every pull request and push to `main`. Use `Build IIS application image` from the Actions tab to start an image build manually, or merge an application change to `main`. The build workflow submits Cloud Build, creates the promotion pull request, and records the result in the Actions summary. Merge that reviewed pull request to trigger `Reconcile production blue-green state`; that workflow deploys, validates, publishes the temporary endpoint, waits ten minutes, and tears everything down.
 ## Included software
 
 - IIS with a small validation page
 - Git for Windows
-- Pinned .NET 7.0.410 SDK for the demonstration project
+supported development environment with the Google Cloud CLI and GitHub CLI installed. The control plane runs locally while Cloud Build creates the temporary Windows VMs in GCP.
 - .NET 8 SDK for current runner compatibility
 - Visual Studio 2022 Community installed from Microsoft's web installer, or a
   licensed full Visual Studio 2022 edition installed from mounted offline media
@@ -123,73 +133,42 @@ Register each runner at instance startup with a short-lived token.
    external IP addresses; replace those with a private subnet plus Cloud NAT
    for an enterprise implementation.
 
-## Run it
+## Run it through GitHub Actions
 
 The default mode installs the full Visual Studio 2022 Community IDE directly
 from Microsoft's web installer, so no ISO, media bucket, product key, or
-builder service account is required. To run the image build:
+builder service account is required. After the one-time trust setup below,
+validation, image builds, promotion pull requests, deployment, viewing, and
+teardown all run from GitHub Actions. No local `gcloud` or `gh` command is part
+of the normal operating flow.
 
-```bash
-gcloud builds submit \
-  --config=pipelines/cloudbuild-image.yaml \
-  --substitutions=_ZONE=us-east1-b,_RUNNER_VERSION=2.328.0,_VS_INSTALL_MODE=web-community \
-  .
-```
+The `Validate repository` workflow runs on every pull request and push to
+`main`. Use `Build IIS application image` from the Actions tab to start an
+image build manually, or merge an application change to `main`. The build
+workflow submits Cloud Build and creates the promotion pull request. Merge
+that reviewed pull request to trigger `Reconcile production blue-green state`;
+that workflow deploys, validates, publishes the temporary endpoint, waits ten
+minutes, and tears everything down.
 
-## Local environment setup
+### One-time administrator bootstrap
 
-This repository is designed to run from a local Linux/macOS shell or a
-supported development environment with the Google Cloud CLI and GitHub CLI
-installed. The control plane runs locally while Cloud Build creates the
-temporary Windows VMs in GCP.
+An administrator must establish the initial GitHub OIDC trust relationship and
+IAM before GitHub Actions can authenticate. This is the only setup operation
+outside GitHub Actions because a workflow cannot use Workload Identity
+Federation before that trust relationship exists. Run
+`framework/bootstrap/bootstrap-github-actions.sh` once from an administrator
+environment, then do all subsequent work through the Actions tab. The script
+does not create a reusable service-account key.
 
-1. Extract this repository, create a GitHub repository from its contents and
-   push the `main` branch.
-2. Authenticate your own GCP identity without writing credentials into Git:
+The bootstrap enables the required APIs, creates the GitHub Actions service
+account and WIF provider, grants Cloud Build submission access, and writes the
+required repository variables. It also sets the default Visual Studio and
+Dynatrace configuration used by the workflows.
 
-   ```bash
-   gcloud auth login --no-launch-browser
-   ```
-
-3. Configure and check the selected project:
-
-   ```bash
-   ./framework/bootstrap/configure-codespace.sh PROJECT_ID us-central1-a
-   ```
-
-   The script creates an isolated local gcloud configuration, verifies project
-   access, reports missing APIs, and prints the exact `gcloud services enable`
-   command when action is required. It does not enable services or change IAM
-   automatically.
-
-4. Run the full repository validation at any time:
-
-   ```bash
-   ./framework/validation/validate-repository.sh
-   ```
-
-5. Configure the GitHub repository variables printed by the bootstrap script.
-   GitHub Actions authenticates to GCP through Workload Identity Federation; do
-   not add a downloaded service-account JSON key to the repository.
-
-### Bootstrap GitHub Actions authentication
-
-The first GitHub Actions run needs a one-time trust relationship between the
-repository and GCP. Run this after `gcloud auth login` and `gh auth login`:
-
-```bash
-./framework/bootstrap/bootstrap-github-actions.sh PROJECT_ID us-central1-a
-```
-
-This creates the GitHub OIDC provider, a dedicated Cloud Build submitter
-service account, the required IAM bindings and GitHub repository variables.
-It is deliberately run with your existing administrator identity because a
-workflow cannot authenticate through Workload Identity Federation before that
-trust relationship exists. It does not create a reusable service-account key.
-
-After it succeeds, pushes to `main` can build images and create promotion pull
-requests through `build-app-image.yml`; merging a promotion pull request runs
-`reconcile-production.yml`.
+The required repository variables are `GCP_PROJECT_ID`, `GCP_ZONE`,
+`GCP_WIF_PROVIDER`, and `GCP_SERVICE_ACCOUNT`. GitHub Actions authenticates
+with short-lived OIDC credentials; never add a downloaded service-account JSON
+key to the repository.
 
 ## Reusing the framework for another project
 
@@ -264,33 +243,22 @@ VS 2022 Community layout ISO
           4. Compile .NET 7 / C# 7 demo with MSBuild
           5. Execute and validate compiled application
           6. Validate devenv.exe and MSBuild
-          7. Dismount and delete ISO
+          ### One-time administrator bootstrap
           8. Sysprep and capture image
-```
-
+          An administrator must establish the initial GitHub OIDC trust relationship and IAM before GitHub Actions can authenticate. This is the only setup operation outside GitHub Actions because a workflow cannot use Workload Identity Federation before that trust relationship exists. Run `framework/bootstrap/bootstrap-github-actions.sh` once from an administrator environment, then do all subsequent work through the Actions tab. The script does not create a reusable service-account key.
 Community Edition does not use a product key, so the default path does not
-create or read a licensing secret. In the optional Enterprise/Professional
-path, the product key is not committed to Git or placed in instance metadata.
-It is read from Secret Manager and supplied to Microsoft's supported
+          The bootstrap enables the required APIs, creates the GitHub Actions service account and WIF provider, grants Cloud Build submission access, and writes the required repository variables. It also sets the default Visual Studio and Dynatrace configuration used by the workflows.
 `--productKey` installation parameter.
-
-A product key is an activation mechanism, not proof of licensing entitlement.
-Confirm with your Microsoft licensing team that the selected Enterprise or
-Professional license permits the number of concurrently running image clones.
+          The required repository variables are `GCP_PROJECT_ID`, `GCP_ZONE`, `GCP_WIF_PROVIDER`, and `GCP_SERVICE_ACCOUNT`. GitHub Actions authenticates with short-lived OIDC credentials; never add a downloaded service-account JSON key to the repository.
 For unattended compilation where the IDE is unnecessary, Build Tools is usually
-the simpler licensing and operational choice.
+          ### 3. Run the full Visual Studio build through Actions
 
-### 1. Create the offline layout ISO
-
-On a licensed Windows administration machine with the Windows ADK Deployment
-Tools installed, run:
-
-```powershell
+          Set the Visual Studio repository variables, then start `Build IIS application image` from the GitHub Actions tab. The workflow passes them to Cloud Build through Workload Identity Federation; no local Cloud Build submission is needed.
 .\tools\New-VS2022OfflineMedia.ps1 `
   -Edition Community `
   -LayoutPath C:\VS2022Layout `
   -IsoPath C:\VS2022Media\vs2022-community-layout.iso
-```
+          `Reconcile production blue-green state` from the GitHub Actions tab. A successful deployment is reported only after the 10-minute viewing window and teardown complete. If deployment or validation fails, cleanup still runs and the original failure is returned.
 
 The script uses `projects/sample/config/vs2022.vsconfig`, verifies the layout, builds an ISO with
 `oscdimg.exe`, and prints its SHA-256 hash. A complete layout can exceed 45 GB;
@@ -323,23 +291,18 @@ that bucket. Cloud Build receives `iam.serviceAccountUser` only on the builder
 identity. Enterprise and Professional setup additionally grants access to their
 specific product-key secret.
 
-### 3. Run the full Visual Studio build
+### 3. Run the full Visual Studio build through Actions
 
-```bash
-gcloud builds submit \
-  --config=pipelines/cloudbuild-image.yaml \
-  --substitutions="_VS_INSTALL_MODE=offline-iso,_VS_EDITION=community,_VS_MEDIA_URI=gs://VS_MEDIA_BUCKET/vs2022-community-layout.iso,_VS_PRODUCT_KEY_SECRET=unused,_BUILDER_SERVICE_ACCOUNT=windows-image-builder@PROJECT_ID.iam.gserviceaccount.com" \
-  .
-```
-
-For GitHub-triggered builds, configure repository variables with the same five
-names without their leading underscores. The workflow passes them to Cloud
-Build through Workload Identity Federation.
+Set the Visual Studio repository variables, then start `Build IIS application
+image` from the GitHub Actions tab. The workflow passes them to Cloud Build
+through Workload Identity Federation; no local Cloud Build submission is
+needed.
 
 Supported modes:
 
 | Mode | Behavior |
 | --- | --- |
+| `web-community` | Downloads and installs the full VS 2022 Community IDE; no ISO needed |
 | `web-buildtools` | Downloads and installs VS 2022 Build Tools; no key needed |
 | `offline-iso` | Downloads from GCS, mounts the ISO and installs full VS 2022 |
 | `disabled` | Skips Visual Studio installation |
@@ -362,11 +325,13 @@ file explicitly contains:
 <LangVersion>7.0</LangVersion>
 ```
 
-The image build installs the pinned 7.0.410 SDK, invokes the MSBuild executable
-inside the Visual Studio installation, publishes the application, executes the
-result and records non-secret build proof at
-`C:\ImageMetadata\seven-demo-build.json`. The smoke-test VM executes the same
-compiled DLL again before the image can be promoted.
+The image build installs the pinned 7.0.410 SDK, invokes `devenv.com /Build
+Release` against the sample project, publishes the application with the Visual
+Studio MSBuild executable, and executes the result. Non-secret proof is written
+to `C:\ImageMetadata\seven-demo-build.json`, with the `devenv.com` output in
+`C:\ImageMetadata\seven-demo-devenv-build.log`. The smoke-test VM verifies that
+the IDE build proof exists and executes the same compiled DLL again before the
+image can be promoted.
 
 .NET 7 is out of support, so this target is appropriate for demonstrating the
 requested legacy toolchain, not for a new production application.
@@ -399,7 +364,8 @@ flowchart TD
 ```
 
 Create an access token in Dynatrace with only the `InstallerDownload` scope.
-Then run the interactive setup from your authenticated shell:
+Run the setup from an administrator environment, then use the GitHub Actions
+workflows for all image and deployment operations:
 
 ```bash
 ./integrations/dynatrace/setup-dynatrace.sh \
@@ -461,8 +427,8 @@ The image and deployment pipelines are formatted for a live demonstration:
   Build output into collapsible sections.
 - Cloud Build prints UTC timestamps plus numbered `PIPELINE`, `STAGE`, `DEPLOY`,
   `DYNATRACE`, `DEMO`, and `TEARDOWN` messages.
-- Windows startup-script progress is streamed from the serial console without
-  repeatedly printing the full serial log. Visual Studio media download,
+- OpenSSH is bootstrapped by the Windows startup script; provisioning and smoke
+  test output stream through the IAP SSH session. Visual Studio media download,
   mounting, installation, MSBuild compilation, SevenDemo execution, IIS checks,
   smoke tests and Sysprep are individually visible.
 - Successful checks print `[PASS]`; failures print `[FAIL]`, propagate a
@@ -507,17 +473,11 @@ After the next successful promotion, both blue and green are populated.
 
 ### Manual reconciliation
 
-After putting a valid image in `environments/prod/deployment.env`:
-
-```bash
-gcloud builds submit --config=pipelines/cloudbuild-deploy.yaml .
-```
-
-The command remains active through the 10-minute viewing window and teardown.
-For a shorter test, override the delay—for example,
-`--substitutions=_TEARDOWN_DELAY_SECONDS=60`. A successful deployment is only
-reported successful after teardown completes. If deployment or validation
-fails, cleanup still runs and the original nonzero result is returned.
+After putting a valid image in `environments/prod/deployment.env`, start
+`Reconcile production blue-green state` from the GitHub Actions tab. A
+successful deployment is reported only after the 10-minute viewing window and
+teardown complete. If deployment or validation fails, cleanup still runs and
+the original failure is returned.
 
 The deployment script creates the MVP HTTP load balancer and prints its public
 IP. Use HTTPS, a managed certificate, a custom VPC and restricted administration
