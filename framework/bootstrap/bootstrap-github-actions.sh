@@ -30,6 +30,7 @@ gcloud config set compute/zone "$ZONE" >/dev/null
 gcloud services enable \
   cloudbuild.googleapis.com \
   compute.googleapis.com \
+  iap.googleapis.com \
   iam.googleapis.com \
   iamcredentials.googleapis.com \
   secretmanager.googleapis.com \
@@ -69,6 +70,9 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:$GITHUB_SERVICE_ACCOUNT" \
   --role=roles/serviceusage.serviceUsageConsumer >/dev/null
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:$GITHUB_SERVICE_ACCOUNT" \
+  --role=roles/iap.tunnelResourceAccessor >/dev/null
 
 gcloud iam service-accounts add-iam-policy-binding "$GITHUB_SERVICE_ACCOUNT" \
   --project="$PROJECT_ID" \

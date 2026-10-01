@@ -1,0 +1,8 @@
+flowchart TD
+    A["Create application VM"] --> B{"Dynatrace enabled?"}
+    B -- "No" --> C["Validate IIS"]
+    B -- "Yes" --> D["Read token from Secret Manager"]
+    D --> E["Download and verify OneAgent"]
+    E --> F["Install, restart IIS and validate"]
+    F --> C
+    C --> G["Allow load-balancer promotion"]

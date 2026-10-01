@@ -55,7 +55,9 @@ try {
             if ($vs.mode -in @('web-community', 'offline-iso')) {
                 $devenv = Join-Path $vs.installPath 'Common7\IDE\devenv.exe'
                 if (-not (Test-Path $devenv)) { throw 'Visual Studio IDE validation failed in the smoke-test VM' }
-                Write-DemoPass 'Visual Studio IDE' 'devenv.exe is present'
+                $devenvBuildLog = 'C:\ImageMetadata\seven-demo-devenv-build.log'
+                if (-not (Test-Path $devenvBuildLog)) { throw 'devenv.com build proof is missing from the image' }
+                Write-DemoPass 'Visual Studio IDE' 'devenv.exe is present and the sample was built with devenv.com'
             }
             Write-DemoPass 'MSBuild' 'MSBuild executed successfully'
             Write-DemoStage 3 4 'Execute compiled .NET 7 / C# 7 demonstration application'

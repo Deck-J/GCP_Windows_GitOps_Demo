@@ -46,6 +46,7 @@ gcloud config set compute/zone "$ZONE" >/dev/null
 REQUIRED_APIS=(
   cloudbuild.googleapis.com
   compute.googleapis.com
+  iap.googleapis.com
   iam.googleapis.com
   iamcredentials.googleapis.com
   secretmanager.googleapis.com

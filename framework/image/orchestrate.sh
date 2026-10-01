@@ -50,6 +50,8 @@ REVISION_TOKEN="$(printf '%s' "$SOURCE_REVISION" | tr '[:upper:]_' '[:lower:]-' 
 [[ -z "$REVISION_TOKEN" ]] && REVISION_TOKEN="$BUILD_TOKEN"
 IMAGE_NAME="${IMAGE_FAMILY}-${VERSION_TOKEN}-${REVISION_TOKEN}"
 IMAGE_NAME="$(printf '%s' "$IMAGE_NAME" | cut -c1-63 | sed 's/-$//')"
+SSH_TAG="${BUILD_VM}-ssh"
+SSH_FIREWALL="${BUILD_VM}-iap-ssh"
 VS_CONFIG_B64=''
 if [[ -f projects/sample/config/vs2022.vsconfig ]]; then
   VS_CONFIG_B64="$(base64 -w0 projects/sample/config/vs2022.vsconfig)"
@@ -74,6 +76,9 @@ BUILD_TIMEOUT_SECONDS=6300
 TEST_TIMEOUT_SECONDS=900
 POLL_SECONDS=20
 BUILD_SUCCEEDED=false
+SSH_USER='gcebuilder'
+SSH_KEY_DIR=''
+SSH_KEY_FILE=''
 declare -A SERIAL_LINES_SEEN=()
 
 cleanup() {
@@ -94,6 +99,13 @@ cleanup() {
     log "[CLEANUP] Removing failed candidate image if it exists"
     gcloud compute images delete "$IMAGE_NAME" \
       --project="$PROJECT_ID" --quiet >/dev/null 2>&1 || true
+  fi
+
+  gcloud compute firewall-rules delete "$SSH_FIREWALL" \
+    --project="$PROJECT_ID" --quiet >/dev/null 2>&1 || true
+
+  if [[ -n "$SSH_KEY_DIR" ]]; then
+    rm -rf "$SSH_KEY_DIR"
   fi
 
   exit "$exit_code"
@@ -198,7 +210,33 @@ wait_for_terminated() {
   done
 }
 
+ssh_command() {
+  local vm_name="$1"
+  local command="$2"
+  gcloud compute ssh "$SSH_USER@$vm_name" \
+    --project="$PROJECT_ID" --zone="$ZONE" \
+    --tunnel-through-iap --quiet --ssh-key-file="$SSH_KEY_FILE" \
+    --ssh-flag='-o UserKnownHostsFile=/dev/null' \
+    --ssh-flag='-o StrictHostKeyChecking=no' \
+    --command="$command"
+}
+
+copy_to_vm() {
+  local vm_name="$1"
+  local source_path="$2"
+  local destination_path="$3"
+  gcloud compute scp "$source_path" "$SSH_USER@$vm_name:$destination_path" \
+    --project="$PROJECT_ID" --zone="$ZONE" \
+    --tunnel-through-iap --quiet --ssh-key-file="$SSH_KEY_FILE" \
+    --scp-flag='-o UserKnownHostsFile=/dev/null' \
+    --scp-flag='-o StrictHostKeyChecking=no'
+}
+
 pipeline_stage 1 "Validate inputs and prepare immutable image name $IMAGE_NAME"
+SSH_KEY_DIR="$(mktemp -d)"
+SSH_KEY_FILE="$SSH_KEY_DIR/id_ed25519"
+ssh-keygen -q -t ed25519 -N '' -f "$SSH_KEY_FILE"
+SSH_PUBLIC_KEY="$(<"$SSH_KEY_FILE.pub")"
 SERVICE_ACCOUNT_ARGS=(--no-service-account --no-scopes)
 if [[ "$VS_INSTALL_MODE" == "offline-iso" ]]; then
   [[ "$BUILDER_SERVICE_ACCOUNT" == *@*.iam.gserviceaccount.com ]] || { log "[FAIL] A valid BUILDER_SERVICE_ACCOUNT is required for offline-iso"; exit 1; }
@@ -207,6 +245,10 @@ if [[ "$VS_INSTALL_MODE" == "offline-iso" ]]; then
 fi
 
 pipeline_stage 2 "Create Windows builder VM $BUILD_VM"
+gcloud compute firewall-rules create "$SSH_FIREWALL" \
+  --project="$PROJECT_ID" --network=default --direction=INGRESS \
+  --action=ALLOW --rules=tcp:22 --source-ranges=35.235.240.0/20 \
+  --target-tags="$SSH_TAG"
 gcloud compute instances create "$BUILD_VM" \
   --project="$PROJECT_ID" \
   --zone="$ZONE" \
@@ -215,12 +257,23 @@ gcloud compute instances create "$BUILD_VM" \
   --image-family="$SOURCE_IMAGE_FAMILY" \
   --boot-disk-size=200GB \
   --boot-disk-type=pd-balanced \
+  --tags="$SSH_TAG" \
   "${SERVICE_ACCOUNT_ARGS[@]}" \
-  --metadata="runner-version=${RUNNER_VERSION},vs-install-mode=${VS_INSTALL_MODE},vs-edition=${VS_EDITION},vs-media-uri=${VS_MEDIA_URI},vs-product-key-secret=${VS_PRODUCT_KEY_SECRET},vs-config-b64=${VS_CONFIG_B64},demo-project-b64=${DEMO_PROJECT_B64},demo-program-b64=${DEMO_PROGRAM_B64},demo-global-json-b64=${DEMO_GLOBAL_JSON_B64},project-mode=${PROJECT_MODE},project-setup-b64=${PROJECT_SETUP_B64},project-validate-b64=${PROJECT_VALIDATE_B64},project-health-path=${PROJECT_HEALTH_PATH},project-health-port=${PROJECT_HEALTH_PORT},app-version=${APP_VERSION},source-revision=${SOURCE_REVISION},app-index-b64=${APP_INDEX_B64},app-health-b64=${APP_HEALTH_B64}" \
-  --metadata-from-file=windows-startup-script-ps1=framework/image/windows/bootstrap.ps1
+  --metadata="ephemeral-ssh-user=${SSH_USER},ephemeral-ssh-public-key=${SSH_PUBLIC_KEY},runner-version=${RUNNER_VERSION},vs-install-mode=${VS_INSTALL_MODE},vs-edition=${VS_EDITION},vs-media-uri=${VS_MEDIA_URI},vs-product-key-secret=${VS_PRODUCT_KEY_SECRET},vs-config-b64=${VS_CONFIG_B64},demo-project-b64=${DEMO_PROJECT_B64},demo-program-b64=${DEMO_PROGRAM_B64},demo-global-json-b64=${DEMO_GLOBAL_JSON_B64},project-mode=${PROJECT_MODE},project-setup-b64=${PROJECT_SETUP_B64},project-validate-b64=${PROJECT_VALIDATE_B64},project-health-path=${PROJECT_HEALTH_PATH},project-health-port=${PROJECT_HEALTH_PORT},app-version=${APP_VERSION},source-revision=${SOURCE_REVISION},app-index-b64=${APP_INDEX_B64},app-health-b64=${APP_HEALTH_B64}" \
+  --metadata-from-file=windows-startup-script-ps1=framework/image/windows/ssh-bootstrap.ps1
 
 pipeline_stage 3 "Stream Windows provisioning and Visual Studio installation"
-wait_for_marker "$BUILD_VM" "IMAGE_BUILD_COMPLETE" "IMAGE_BUILD_FAILED:" "$BUILD_TIMEOUT_SECONDS"
+wait_for_marker "$BUILD_VM" "SSH_BOOTSTRAP_READY" "SSH_BOOTSTRAP_FAILED:" "$BUILD_TIMEOUT_SECONDS"
+copy_to_vm "$BUILD_VM" framework/image/windows/bootstrap.ps1 'C:/ImageBuild/bootstrap.ps1'
+set +e
+ssh_command "$BUILD_VM" 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/ImageBuild/bootstrap.ps1' | tee "$BUILD_VM-ssh.log"
+SSH_STATUS=${PIPESTATUS[0]}
+set -e
+if ! grep -Fq 'IMAGE_BUILD_COMPLETE' "$BUILD_VM-ssh.log"; then
+  log "[$BUILD_VM] [FAIL] SSH provisioning did not report IMAGE_BUILD_COMPLETE (exit code $SSH_STATUS)"
+  exit 1
+fi
+log "[$BUILD_VM] [PASS] SSH provisioning reported IMAGE_BUILD_COMPLETE"
 log "[INFO] Provisioning completed; waiting for Sysprep shutdown"
 wait_for_terminated "$BUILD_VM" 900
 
@@ -245,9 +298,21 @@ gcloud compute instances create "$TEST_VM" \
   --boot-disk-size=200GB \
   --no-service-account \
   --no-scopes \
-  --metadata-from-file=windows-startup-script-ps1=framework/image/windows/smoke-test.ps1
+  --tags="$SSH_TAG" \
+  --metadata="ephemeral-ssh-user=${SSH_USER},ephemeral-ssh-public-key=${SSH_PUBLIC_KEY}" \
+  --metadata-from-file=windows-startup-script-ps1=framework/image/windows/ssh-bootstrap.ps1
 
-wait_for_marker "$TEST_VM" "SMOKE_TEST_PASS" "SMOKE_TEST_FAIL:" "$TEST_TIMEOUT_SECONDS"
+wait_for_marker "$TEST_VM" "SSH_BOOTSTRAP_READY" "SSH_BOOTSTRAP_FAILED:" "$TEST_TIMEOUT_SECONDS"
+copy_to_vm "$TEST_VM" framework/image/windows/smoke-test.ps1 'C:/ImageBuild/smoke-test.ps1'
+set +e
+ssh_command "$TEST_VM" 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/ImageBuild/smoke-test.ps1' | tee "$TEST_VM-ssh.log"
+SSH_STATUS=${PIPESTATUS[0]}
+set -e
+if ! grep -Fq 'SMOKE_TEST_PASS' "$TEST_VM-ssh.log"; then
+  log "[$TEST_VM] [FAIL] SSH smoke test did not report SMOKE_TEST_PASS (exit code $SSH_STATUS)"
+  exit 1
+fi
+log "[$TEST_VM] [PASS] SSH smoke test reported SMOKE_TEST_PASS"
 wait_for_terminated "$TEST_VM" 300
 
 BUILD_SUCCEEDED=true

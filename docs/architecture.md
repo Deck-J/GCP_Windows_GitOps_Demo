@@ -5,16 +5,21 @@
 ```mermaid
 sequenceDiagram
     participant Dev as Developer
+    participant GH as GitHub-hosted Linux runner
     participant Git as GitHub
     participant Build as Cloud Build
-    participant GCE as Compute Engine
+    participant Win as Temporary Windows VM in GCP
+    participant GCE as Compute Engine runtime
     participant DT as Dynatrace
     participant LB as Load balancer
 
     Dev->>Git: Merge app and VERSION change
-    Git->>Build: Build immutable image
-    Build->>GCE: Create, provision and test image
-    Build-->>Git: Image build succeeds
+    Git->>GH: Trigger GitHub Actions workflow
+    GH->>Build: Authenticate via OIDC and submit image pipeline
+    Build->>Win: Create Windows builder VM
+    Win->>Win: Install IIS, .NET, VS, app and smoke-test tools
+    Win-->>Build: Windows image passes validation
+    Build-->>Git: Publish immutable image metadata
     Git->>Git: Open inactive-color promotion PR
     Dev->>Git: Review and merge desired state
     Git->>Build: Reconcile production
@@ -30,6 +35,10 @@ sequenceDiagram
     Build->>LB: Delete demo frontend and backend
     Build->>GCE: Delete both MIGs, disks and templates
 ```
+
+The GitHub-hosted runner is Linux-only and performs orchestration. The actual
+Windows image build, Windows installation steps, and validation run inside a
+temporary Windows VM launched by Cloud Build in GCP.
 
 ## State ownership
 

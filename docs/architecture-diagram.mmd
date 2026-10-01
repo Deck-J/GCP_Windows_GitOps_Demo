@@ -1,0 +1,65 @@
+flowchart TD
+  classDef linux fill:#eaf2ff,stroke:#2357a6,stroke-width:2px,color:#111;
+  classDef windows fill:#eafaf1,stroke:#216e3a,stroke-width:2px,color:#111;
+  classDef gcp fill:#fff5e6,stroke:#b05a00,stroke-width:2px,color:#111;
+
+  subgraph GH["GitHub-hosted runner: Linux orchestration only"]
+    direction TB
+    A["Code change on main"]:::linux --> B["GitHub Actions on ubuntu-latest\nOIDC auth to GCP"]:::linux
+    B --> C["Submit Cloud Build pipeline"]:::linux
+  end
+
+  C --> D["Cloud Build creates Windows builder VM in GCP"]:::gcp
+  D --> P0["Startup script enables OpenSSH and authorizes temp key"]:::windows
+
+  subgraph WIN["Windows builder VM: runs the image build and smoke tests"]
+    direction TD
+    P0 --> P0A["Copy bootstrap.ps1 over SSH"]:::windows
+    P0A --> P1["PowerShell stage 1/9\nInstall IIS and publish app"]:::windows
+    P1 --> P2["PowerShell stage 2/9\nInstall Git for Windows"]:::windows
+    P2 --> P3["PowerShell stage 3/9\nInstall pinned .NET 7 SDK"]:::windows
+    P3 --> P4["PowerShell stage 4/9\nInstall .NET 8 SDK"]:::windows
+    P4 --> P5["PowerShell stage 5/9\nInstall Visual Studio 2022"]:::windows
+    P5 --> P5A{"Installation mode?"}:::windows
+    P5A -- "web-buildtools" --> P5B["Install VS Build Tools"]:::windows
+    P5A -- "offline-iso" --> P5C["Install from mounted ISO"]:::windows
+    P5C --> P5D["Read product key from Secret Manager"]:::windows
+    P5D --> P5E["Complete install and dismount ISO"]:::windows
+    P5A -- "disabled" --> P5F["Skip VS install"]:::windows
+    P5B --> P5G["Validate MSBuild and devenv.exe"]:::windows
+    P5E --> P5G
+    P5F --> P6
+    P5G --> P6["PowerShell stage 6/9\nRun project setup and validation hooks"]:::windows
+    P6 --> P7["PowerShell stage 7/9\nStage pinned GitHub Actions runner binaries"]:::windows
+    P7 --> P8["PowerShell stage 8/9\nVerify installed tools and HTTP health"]:::windows
+    P8 --> P9["PowerShell stage 9/9\nSysprep and shut down VM"]:::windows
+  end
+
+  P9 --> Q["Capture immutable Windows image"]:::gcp
+  Q --> S["Boot smoke-test VM from captured image"]:::windows
+
+  subgraph SMOKE["Smoke-test VM: Windows validation only"]
+    direction TD
+    S --> S1["Smoke stage 1/4\nVerify IIS, app files and image proof"]:::windows
+    S1 --> S2["Smoke stage 2/4\nRun Git, dotnet and MSBuild checks"]:::windows
+    S2 --> S3["Smoke stage 3/4\nExecute SevenDemo when enabled"]:::windows
+    S3 --> S4["Smoke stage 4/4\nRequest IIS health endpoint"]:::windows
+    S4 --> S5["SMOKE_TEST_PASS"]:::windows
+  end
+
+  S5 --> T["Publish image metadata\nremove temporary build resources"]:::gcp
+  T --> U["Open promotion PR"]:::linux
+  U --> V["Merge reviewed production manifest"]:::linux
+  V --> W["Read ACTIVE_COLOR and target image\nfrom deployment.env"]:::linux
+  W --> X["Reconcile firewall, health check\nand backend service"]:::gcp
+  X --> Y["Create immutable template\nand reconcile target MIG"]:::gcp
+  Y --> Z["Wait for stable instances\nand IIS health"]:::gcp
+  Z --> DX{"Dynatrace enabled?"}:::gcp
+  DX -- "No" --> H["Set target backend capacity to 1"]:::gcp
+  DX -- "Yes" --> DY["Install OneAgent on runtime VMs"]:::gcp
+  DY --> H
+  H --> I["Publish HTTP load-balancer endpoint"]:::gcp
+  I --> J["10-minute viewing and validation window"]:::gcp
+  J --> K["Teardown both MIGs, disks, templates\nand load balancer"]:::gcp
+
+  NOTE["Important: the Linux runner is only the GitHub Actions control plane.\nThe actual Windows image build, installation, and smoke tests\nruns inside the temporary Windows VM created by Cloud Build."]:::linux

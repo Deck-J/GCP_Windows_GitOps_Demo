@@ -237,6 +237,13 @@ try {
         $demoPublish = 'C:\DemoArtifacts\SevenDemo'
         New-Item -Path $demoPublish -ItemType Directory -Force | Out-Null
         $demoProject = Join-Path $demoSource 'SevenDemo.csproj'
+        $devenv = Join-Path $vsInstallRoot 'Common7\IDE\devenv.com'
+        $devenvLog = 'C:\ImageMetadata\seven-demo-devenv-build.log'
+        if (-not (Test-Path $devenv)) { throw 'Visual Studio devenv.com was not found' }
+
+        Write-DemoInfo 'Building SevenDemo with Visual Studio devenv.com'
+        & $devenv $demoProject /Build Release /Out $devenvLog
+        if ($LASTEXITCODE -ne 0) { throw "SevenDemo devenv build failed with code $LASTEXITCODE" }
 
         Write-DemoInfo 'Compiling SevenDemo with Visual Studio MSBuild'
         & $msbuild $demoProject /restore /t:Publish /p:Configuration=Release "/p:PublishDir=$demoPublish\"
@@ -254,8 +261,9 @@ try {
             targetFramework = 'net7.0'
             languageVersion = '7.0'
             sdkVersion = '7.0.410'
-            compiler = 'Visual Studio 2022 MSBuild'
+            compiler = 'Visual Studio 2022 devenv.com and MSBuild'
             visualStudioEdition = $vsEdition
+            devenvBuildLog = $devenvLog
             output = $demoOutput
         } | ConvertTo-Json | Set-Content -Path 'C:\ImageMetadata\seven-demo-build.json' -Encoding UTF8
         Write-DemoPass 'SevenDemo' $demoOutput
@@ -291,6 +299,23 @@ try {
     Write-DemoStage 9 9 'Clean temporary files and run Sysprep'
     Remove-Item -Path $work -Recurse -Force
     Clear-RecycleBin -Force -ErrorAction SilentlyContinue
+
+    $sshUser = Get-MetadataValue 'ephemeral-ssh-user' ''
+    if ($sshUser) {
+        $sshCleanupPath = 'C:\Windows\Temp\cleanup-ephemeral-ssh.ps1'
+        @"
+Start-Sleep -Seconds 15
+Remove-Item -Path 'C:\ProgramData\ssh\recurring_authorized_keys' -Force -ErrorAction SilentlyContinue
+Remove-LocalGroupMember -Group 'Administrators' -Member '$sshUser' -ErrorAction SilentlyContinue
+Remove-LocalUser -Name '$sshUser' -ErrorAction SilentlyContinue
+Remove-Item -Path 'C:\ProgramData\ssh\sshd_config' -Force -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName 'CleanupEphemeralSsh' -Confirm:`$false -ErrorAction SilentlyContinue
+"@ | Set-Content -Path $sshCleanupPath -Encoding UTF8 -Force
+        $cleanupAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$sshCleanupPath`""
+        $cleanupPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        Register-ScheduledTask -TaskName 'CleanupEphemeralSsh' -Action $cleanupAction -Principal $cleanupPrincipal -Force | Out-Null
+        Start-ScheduledTask -TaskName 'CleanupEphemeralSsh'
+    }
 
     # Cloud Build waits for this marker before it begins waiting for shutdown.
     Write-Output 'IMAGE_BUILD_COMPLETE'
