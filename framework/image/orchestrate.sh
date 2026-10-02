@@ -5,6 +5,30 @@ set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
+POSITIONAL_ARGS=()
+MANAGEMENT_MODE="${MANAGEMENT_MODE:-false}"
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --management-mode)
+      MANAGEMENT_MODE="true"
+      if [[ "${2:-}" == "true" || "${2:-}" == "false" ]]; then
+        MANAGEMENT_MODE="$2"
+        shift
+      fi
+      ;;
+    --management-mode=*)
+      MANAGEMENT_MODE="${1#*=}"
+      ;;
+    *)
+      POSITIONAL_ARGS+=("$1")
+      ;;
+  esac
+  shift
+done
+set -- "${POSITIONAL_ARGS[@]}"
+
+[[ "$MANAGEMENT_MODE" =~ ^(true|false)$ ]] || { printf '[FAIL] --management-mode must be true or false\n' >&2; exit 2; }
+
 PROJECT_ID="${1:?project id is required}"
 ZONE="${2:?zone is required}"
 SOURCE_IMAGE_FAMILY="${3:?source image family is required}"
@@ -19,6 +43,8 @@ VS_EDITION="${11:-enterprise}"
 VS_MEDIA_URI="${12:-}"
 VS_PRODUCT_KEY_SECRET="${13:-}"
 BUILDER_SERVICE_ACCOUNT="${14:-}"
+NETWORK="${NETWORK:-default}"
+SUBNET="${SUBNET:-default}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -52,6 +78,8 @@ IMAGE_NAME="${IMAGE_FAMILY}-${VERSION_TOKEN}-${REVISION_TOKEN}"
 IMAGE_NAME="$(printf '%s' "$IMAGE_NAME" | cut -c1-63 | sed 's/-$//')"
 SSH_TAG="${BUILD_VM}-ssh"
 SSH_FIREWALL="${BUILD_VM}-iap-ssh"
+RDP_TAG="${BUILD_VM}-iap-rdp"
+RDP_FIREWALL="${BUILD_VM}-iap-rdp"
 VS_CONFIG_B64=''
 if [[ -f projects/sample/config/vs2022.vsconfig ]]; then
   VS_CONFIG_B64="$(base64 -w0 projects/sample/config/vs2022.vsconfig)"
@@ -76,6 +104,7 @@ BUILD_TIMEOUT_SECONDS=6300
 TEST_TIMEOUT_SECONDS=900
 POLL_SECONDS=20
 BUILD_SUCCEEDED=false
+MANAGEMENT_VM_CREATED=false
 SSH_USER='gcebuilder'
 SSH_KEY_DIR=''
 SSH_KEY_FILE=''
@@ -85,7 +114,9 @@ cleanup() {
   local exit_code=$?
   set +e
 
-  if [[ "$exit_code" -ne 0 && "$KEEP_FAILED_VM" == "true" ]]; then
+  if [[ "$MANAGEMENT_MODE" == "true" && "$MANAGEMENT_VM_CREATED" == "true" ]]; then
+    log "[CLEANUP] Preserving management VM $BUILD_VM and its IAP RDP firewall rule"
+  elif [[ "$exit_code" -ne 0 && "$KEEP_FAILED_VM" == "true" ]]; then
     log "[CLEANUP] Build failed; preserving temporary VMs because KEEP_FAILED_VM=true"
   else
     log "[CLEANUP] Removing temporary smoke-test and builder VMs"
@@ -95,7 +126,7 @@ cleanup() {
       --project="$PROJECT_ID" --zone="$ZONE" --quiet >/dev/null 2>&1 || true
   fi
 
-  if [[ "$exit_code" -ne 0 && "$BUILD_SUCCEEDED" != "true" ]]; then
+  if [[ "$MANAGEMENT_MODE" != "true" && "$exit_code" -ne 0 && "$BUILD_SUCCEEDED" != "true" ]]; then
     log "[CLEANUP] Removing failed candidate image if it exists"
     gcloud compute images delete "$IMAGE_NAME" \
       --project="$PROJECT_ID" --quiet >/dev/null 2>&1 || true
@@ -103,6 +134,10 @@ cleanup() {
 
   gcloud compute firewall-rules delete "$SSH_FIREWALL" \
     --project="$PROJECT_ID" --quiet >/dev/null 2>&1 || true
+  if [[ "$MANAGEMENT_VM_CREATED" != "true" ]]; then
+    gcloud compute firewall-rules delete "$RDP_FIREWALL" \
+      --project="$PROJECT_ID" --quiet >/dev/null 2>&1 || true
+  fi
 
   if [[ -n "$SSH_KEY_DIR" ]]; then
     rm -rf "$SSH_KEY_DIR"
@@ -246,21 +281,46 @@ fi
 
 pipeline_stage 2 "Create Windows builder VM $BUILD_VM"
 gcloud compute firewall-rules create "$SSH_FIREWALL" \
-  --project="$PROJECT_ID" --network=default --direction=INGRESS \
+  --project="$PROJECT_ID" --network="$NETWORK" --direction=INGRESS \
   --action=ALLOW --rules=tcp:22 --source-ranges=35.235.240.0/20 \
   --target-tags="$SSH_TAG"
+INSTANCE_TAGS="$SSH_TAG"
+if [[ "$MANAGEMENT_MODE" == "true" ]]; then
+  gcloud compute firewall-rules create "$RDP_FIREWALL" \
+    --project="$PROJECT_ID" --network="$NETWORK" --direction=INGRESS \
+    --action=ALLOW --rules=tcp:3389 --source-ranges=35.235.240.0/20 \
+    --target-tags="$RDP_TAG"
+  INSTANCE_TAGS+=",$RDP_TAG"
+fi
 gcloud compute instances create "$BUILD_VM" \
   --project="$PROJECT_ID" \
   --zone="$ZONE" \
+  --network="$NETWORK" \
+  --subnet="$SUBNET" \
+  --no-address \
   --machine-type=n2-standard-8 \
   --image-project=windows-cloud \
   --image-family="$SOURCE_IMAGE_FAMILY" \
   --boot-disk-size=200GB \
   --boot-disk-type=pd-balanced \
-  --tags="$SSH_TAG" \
+  --tags="$INSTANCE_TAGS" \
   "${SERVICE_ACCOUNT_ARGS[@]}" \
   --metadata="ephemeral-ssh-user=${SSH_USER},ephemeral-ssh-public-key=${SSH_PUBLIC_KEY},runner-version=${RUNNER_VERSION},vs-install-mode=${VS_INSTALL_MODE},vs-edition=${VS_EDITION},vs-media-uri=${VS_MEDIA_URI},vs-product-key-secret=${VS_PRODUCT_KEY_SECRET},vs-config-b64=${VS_CONFIG_B64},demo-project-b64=${DEMO_PROJECT_B64},demo-program-b64=${DEMO_PROGRAM_B64},demo-global-json-b64=${DEMO_GLOBAL_JSON_B64},project-mode=${PROJECT_MODE},project-setup-b64=${PROJECT_SETUP_B64},project-validate-b64=${PROJECT_VALIDATE_B64},project-health-path=${PROJECT_HEALTH_PATH},project-health-port=${PROJECT_HEALTH_PORT},app-version=${APP_VERSION},source-revision=${SOURCE_REVISION},app-index-b64=${APP_INDEX_B64},app-health-b64=${APP_HEALTH_B64}" \
   --metadata-from-file=windows-startup-script-ps1=framework/image/windows/ssh-bootstrap.ps1
+MANAGEMENT_VM_CREATED=true
+
+if [[ "$MANAGEMENT_MODE" == "true" ]]; then
+  wait_for_marker "$BUILD_VM" "SSH_BOOTSTRAP_READY" "SSH_BOOTSTRAP_FAILED:" 900
+  log "[MANAGEMENT] Resetting the Windows password for gitops-admin on $BUILD_VM"
+  gcloud compute reset-windows-password "$BUILD_VM" \
+    --project="$PROJECT_ID" --zone="$ZONE" --user=gitops-admin --quiet
+  printf '\nManagement VM %s is private and will be preserved.\n' "$BUILD_VM"
+  printf 'Connect with: gcloud compute start-iap-tunnel %s 3389 --local-host-port=localhost:3389 --project=%s --zone=%s\n' \
+    "$BUILD_VM" "$PROJECT_ID" "$ZONE"
+  printf 'Then open an RDP client to localhost:3389 and sign in as gitops-admin.\n'
+  printf 'The generated Windows password is shown in the reset-windows-password output above.\n'
+  exit 0
+fi
 
 pipeline_stage 3 "Stream Windows provisioning and Visual Studio installation"
 wait_for_marker "$BUILD_VM" "SSH_BOOTSTRAP_READY" "SSH_BOOTSTRAP_FAILED:" "$BUILD_TIMEOUT_SECONDS"
@@ -293,6 +353,9 @@ pipeline_stage 5 "Create and stream smoke-test VM $TEST_VM"
 gcloud compute instances create "$TEST_VM" \
   --project="$PROJECT_ID" \
   --zone="$ZONE" \
+  --network="$NETWORK" \
+  --subnet="$SUBNET" \
+  --no-address \
   --machine-type=e2-standard-4 \
   --image="$IMAGE_NAME" \
   --boot-disk-size=200GB \

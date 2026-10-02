@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Reconcile the GitOps deployment manifest into a validated blue/green Compute Engine runtime.
-# It creates the active MIG and load balancer resources, shifts traffic, and leaves cleanup to run-demo.sh.
+# Reconcile the GitOps manifest into a validated private VM and unmanaged-group deployment.
+# Day-0 load-balancer resources persist; run-demo.sh removes the temporary runtime resources.
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
@@ -19,6 +19,8 @@ DYNATRACE_NETWORK_ZONE="${11:-disabled}"
 MANIFEST="environments/prod/deployment.env"
 PROJECT_HEALTH_PATH="$(jq -r '.healthPath // "/health.html"' projects/sample/project.json)"
 PROJECT_HEALTH_PORT="$(jq -r '.healthPort // 80' projects/sample/project.json)"
+NETWORK="${NETWORK:-default}"
+SUBNET="${SUBNET:-default}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -31,6 +33,11 @@ deploy_stage() {
 # This file is reviewed in Git before execution and contains assignments only.
 # shellcheck disable=SC1090
 source "$MANIFEST"
+NETWORK="${NETWORK:-default}"
+SUBNET="${SUBNET:-default}"
+LB_TYPE="${LB_TYPE:-HTTP}"
+HEALTH_CHECK_PATH="${HEALTH_CHECK_PATH:-$PROJECT_HEALTH_PATH}"
+PORT="${PORT:-$PROJECT_HEALTH_PORT}"
 
 if [[ "${ACTIVE_COLOR:-}" != "blue" && "${ACTIVE_COLOR:-}" != "green" ]]; then
   log "[FAIL] ACTIVE_COLOR must be blue or green"
@@ -43,24 +50,14 @@ ACTIVE_IMAGE="${!ACTIVE_IMAGE_VAR:-}"
 ACTIVE_VERSION="${!ACTIVE_VERSION_VAR:-}"
 [[ -n "$ACTIVE_IMAGE" && -n "$ACTIVE_VERSION" ]] || { log "[FAIL] Active image and version are required"; exit 1; }
 
-if [[ "$ACTIVE_COLOR" == "blue" ]]; then
-  INACTIVE_COLOR=green
-else
-  INACTIVE_COLOR=blue
-fi
-
-ACTIVE_MIG="${APP_NAME}-${ACTIVE_COLOR}"
-INACTIVE_MIG="${APP_NAME}-${INACTIVE_COLOR}"
-HEALTH_CHECK="${APP_NAME}-health"
-BACKEND="${APP_NAME}-backend"
-URL_MAP="${APP_NAME}-url-map"
-PROXY="${APP_NAME}-http-proxy"
-ADDRESS="${APP_NAME}-ip"
-FORWARDING_RULE="${APP_NAME}-http"
-FIREWALL="${APP_NAME}-allow-health-check"
-NETWORK_TAG="${APP_NAME}-web"
-VERSION_TOKEN="$(printf '%s' "$ACTIVE_VERSION" | tr '[:upper:].+_' '[:lower:]---' | tr -cd 'a-z0-9-')"
-IMAGE_TOKEN="$(basename "$ACTIVE_IMAGE" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-' | tail -c 13)"
+HEALTH_CHECK="windows-app-health"
+BACKEND="windows-app-backend"
+VERSION_TOKEN="$(printf '%s' "$ACTIVE_VERSION" | tr '[:upper:].+_' '[:lower:]---' | tr -cd 'a-z0-9-' | cut -c1-10)"
+IMAGE_TOKEN="$(basename "$ACTIVE_IMAGE" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-' | tail -c 11)"
+TARGET_GROUP="${APP_NAME}-${ACTIVE_COLOR}-${VERSION_TOKEN}-${IMAGE_TOKEN}"
+TARGET_GROUP="$(printf '%s' "$TARGET_GROUP" | cut -c1-60 | sed 's/-$//')"
+TARGET_VM="${TARGET_GROUP}-vm"
+TARGET_VM="$(printf '%s' "$TARGET_VM" | cut -c1-63 | sed 's/-$//')"
 
 exists() {
   gcloud "$@" --project="$PROJECT_ID" >/dev/null 2>&1
@@ -81,152 +78,106 @@ validate_dynatrace_settings() {
 }
 
 wait_for_dynatrace() {
-  local mig_name="$1"
+  local vm_name="$1"
   local deadline=$((SECONDS + 600))
-  local instances vm output ready_count line key
-  declare -A seen=()
+  local output
 
-  log "[DYNATRACE] Waiting for every VM in $mig_name to report DYNATRACE_READY"
+  log "[DYNATRACE] Waiting for $vm_name to report DYNATRACE_READY"
   while (( SECONDS < deadline )); do
-    mapfile -t instances < <(
-      gcloud compute instance-groups managed list-instances "$mig_name" \
-        --project="$PROJECT_ID" --zone="$ZONE" \
-        --format='value(instance.basename())' 2>/dev/null || true
-    )
-    ready_count=0
-    for vm in "${instances[@]}"; do
-      [[ -n "$vm" ]] || continue
-      output="$(gcloud compute instances get-serial-port-output "$vm" \
-        --project="$PROJECT_ID" --zone="$ZONE" --port=1 2>/dev/null || true)"
-
-      while IFS= read -r line; do
-        [[ "$line" == *DYNATRACE_* ]] || continue
-        key="$vm|$line"
-        if [[ -z "${seen[$key]:-}" ]]; then
-          seen["$key"]=1
-          log "[$vm] [DYNATRACE] ${line#*DYNATRACE_}"
-        fi
-      done <<<"$output"
-
-      if grep -Fq 'DYNATRACE_FAILED:' <<<"$output"; then
-        log "[FAIL] Dynatrace initialization failed on $vm"
-        return 1
-      fi
-      if grep -Fq 'DYNATRACE_READY' <<<"$output"; then
-        ready_count=$((ready_count + 1))
-      fi
-    done
-
-    if (( ${#instances[@]} >= MIG_SIZE && ready_count >= MIG_SIZE )); then
-      log "[PASS] Dynatrace is ready on $ready_count application VMs"
+    output="$(gcloud compute instances get-serial-port-output "$vm_name" \
+      --project="$PROJECT_ID" --zone="$ZONE" --port=1 2>/dev/null || true)"
+    if grep -Fq 'DYNATRACE_FAILED:' <<<"$output"; then
+      log "[FAIL] Dynatrace initialization failed on $vm_name"
+      return 1
+    fi
+    if grep -Fq 'DYNATRACE_READY' <<<"$output"; then
+      log "[PASS] Dynatrace is ready on $vm_name"
       return 0
     fi
     sleep 15
   done
 
-  log "[FAIL] Timed out waiting for Dynatrace readiness in $mig_name"
+  log "[FAIL] Timed out waiting for Dynatrace readiness on $vm_name"
   return 1
 }
 
 validate_dynatrace_settings
 [[ "$MIG_SIZE" =~ ^[1-9][0-9]*$ ]] || { log "[FAIL] MIG_SIZE must be a positive integer"; exit 1; }
-
-OBSERVABILITY_TOKEN="nodt"
-if [[ "$DYNATRACE_ENABLED" == "true" ]]; then
-  OBSERVABILITY_TOKEN="dt$(printf '%s' "$DYNATRACE_ENVIRONMENT_URL|$DYNATRACE_MONITORING_MODE|$DYNATRACE_HOST_GROUP|$DYNATRACE_NETWORK_ZONE" | sha256sum | cut -c1-8)"
+[[ "$LB_TYPE" =~ ^(HTTP|TCP)$ ]] || { log "[FAIL] LB_TYPE must be HTTP or TCP"; exit 1; }
+if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
+  log "[FAIL] PORT must be between 1 and 65535"
+  exit 1
 fi
-TEMPLATE="${APP_NAME}-${ACTIVE_COLOR}-${OBSERVABILITY_TOKEN}-${VERSION_TOKEN}-${IMAGE_TOKEN}"
-TEMPLATE="$(printf '%s' "$TEMPLATE" | cut -c1-63 | sed 's/-$//')"
+if [[ "$LB_TYPE" == "HTTP" && ! "$HEALTH_CHECK_PATH" =~ ^/ ]]; then
+  log "[FAIL] HEALTH_CHECK_PATH must begin with / for HTTP load balancing"
+  exit 1
+fi
 
 deploy_stage 1 "Read GitOps desired state"
 log "[INFO] Target color=$ACTIVE_COLOR version=$ACTIVE_VERSION image=$ACTIVE_IMAGE"
 
-deploy_stage 2 "Reconcile firewall, health check and backend service"
-if ! exists compute firewall-rules describe "$FIREWALL"; then
-  gcloud compute firewall-rules create "$FIREWALL" \
-    --project="$PROJECT_ID" \
-    --network=default \
-    --direction=INGRESS \
-    --action=ALLOW \
-    --rules=tcp:80 \
-    --source-ranges=35.191.0.0/16,130.211.0.0/22 \
-    --target-tags="$NETWORK_TAG"
+deploy_stage 2 "Validate the Day-0 health check and backend service"
+exists compute health-checks describe "$HEALTH_CHECK" || { log "[FAIL] Run framework/bootstrap/setup-load-balancer.sh before deployment"; exit 1; }
+exists compute backend-services describe "$BACKEND" --global || { log "[FAIL] Required backend service $BACKEND does not exist"; exit 1; }
+
+deploy_stage 3 "Create private target VM and unmanaged instance group $TARGET_GROUP"
+SERVICE_ACCOUNT_ARGS=(--no-service-account --no-scopes)
+STARTUP_ARGS=()
+METADATA="app-color=${ACTIVE_COLOR},app-version=${ACTIVE_VERSION}"
+if [[ "$DYNATRACE_ENABLED" == "true" ]]; then
+  SERVICE_ACCOUNT_ARGS=(--service-account="$DYNATRACE_RUNTIME_SERVICE_ACCOUNT" --scopes=cloud-platform)
+  NETWORK_ZONE="$DYNATRACE_NETWORK_ZONE"
+  [[ "$NETWORK_ZONE" == "disabled" ]] && NETWORK_ZONE=""
+  METADATA+=",dynatrace-enabled=true,dynatrace-environment-url=${DYNATRACE_ENVIRONMENT_URL%/},dynatrace-token-secret=${DYNATRACE_TOKEN_SECRET},dynatrace-monitoring-mode=${DYNATRACE_MONITORING_MODE},dynatrace-host-group=${DYNATRACE_HOST_GROUP},dynatrace-network-zone=${NETWORK_ZONE}"
+  STARTUP_ARGS=(--metadata-from-file=windows-startup-script-ps1=integrations/dynatrace/install-oneagent.ps1)
 fi
 
-if ! exists compute health-checks describe "$HEALTH_CHECK"; then
-  gcloud compute health-checks create http "$HEALTH_CHECK" \
-    --project="$PROJECT_ID" --port="$PROJECT_HEALTH_PORT" --request-path="$PROJECT_HEALTH_PATH" \
-    --check-interval=10s --timeout=5s --healthy-threshold=2 --unhealthy-threshold=3
-fi
-
-if ! exists compute backend-services describe "$BACKEND" --global; then
-  gcloud compute backend-services create "$BACKEND" \
-    --project="$PROJECT_ID" --global --protocol=HTTP --port-name=http \
-    --health-checks="$HEALTH_CHECK"
-fi
-
-deploy_stage 3 "Create immutable template and reconcile $ACTIVE_MIG"
-if ! exists compute instance-templates describe "$TEMPLATE"; then
-  SERVICE_ACCOUNT_ARGS=(--no-service-account --no-scopes)
-  STARTUP_ARGS=()
-  METADATA="app-color=${ACTIVE_COLOR},app-version=${ACTIVE_VERSION}"
-  if [[ "$DYNATRACE_ENABLED" == "true" ]]; then
-    SERVICE_ACCOUNT_ARGS=(--service-account="$DYNATRACE_RUNTIME_SERVICE_ACCOUNT" --scopes=cloud-platform)
-    NETWORK_ZONE="$DYNATRACE_NETWORK_ZONE"
-    [[ "$NETWORK_ZONE" == "disabled" ]] && NETWORK_ZONE=""
-    METADATA+=",dynatrace-enabled=true,dynatrace-environment-url=${DYNATRACE_ENVIRONMENT_URL%/},dynatrace-token-secret=${DYNATRACE_TOKEN_SECRET},dynatrace-monitoring-mode=${DYNATRACE_MONITORING_MODE},dynatrace-host-group=${DYNATRACE_HOST_GROUP},dynatrace-network-zone=${NETWORK_ZONE}"
-    STARTUP_ARGS=(--metadata-from-file=windows-startup-script-ps1=integrations/dynatrace/install-oneagent.ps1)
-  fi
-
-  gcloud compute instance-templates create "$TEMPLATE" \
-    --project="$PROJECT_ID" \
-    --machine-type=e2-standard-2 \
-    --image="$ACTIVE_IMAGE" \
-    --boot-disk-size=200GB \
-    --boot-disk-type=pd-balanced \
+if ! exists compute instances describe "$TARGET_VM" --zone="$ZONE"; then
+  gcloud compute instances create "$TARGET_VM" \
+    --project="$PROJECT_ID" --zone="$ZONE" \
+    --machine-type=e2-standard-2 --image="$ACTIVE_IMAGE" \
+    --network="$NETWORK" --subnet="$SUBNET" --no-address \
+    --boot-disk-size=200GB --boot-disk-type=pd-balanced \
+    --tags="allow-health-check" \
     "${SERVICE_ACCOUNT_ARGS[@]}" \
-    --tags="$NETWORK_TAG" \
     --metadata="$METADATA" \
     "${STARTUP_ARGS[@]}"
 fi
 
-if exists compute instance-groups managed describe "$ACTIVE_MIG" --zone="$ZONE"; then
-  gcloud compute instance-groups managed rolling-action start-update "$ACTIVE_MIG" \
-    --project="$PROJECT_ID" --zone="$ZONE" \
-    --version="template=$TEMPLATE" --max-surge=1 --max-unavailable=0 --replacement-method=substitute
-else
-  gcloud compute instance-groups managed create "$ACTIVE_MIG" \
-    --project="$PROJECT_ID" --zone="$ZONE" --template="$TEMPLATE" --size="$MIG_SIZE"
+if ! exists compute instance-groups unmanaged describe "$TARGET_GROUP" --zone="$ZONE"; then
+  gcloud compute instance-groups unmanaged create "$TARGET_GROUP" \
+    --project="$PROJECT_ID" --zone="$ZONE" --network="$NETWORK"
 fi
-gcloud compute instance-groups managed set-named-ports "$ACTIVE_MIG" \
-  --project="$PROJECT_ID" --zone="$ZONE" --named-ports="http:$PROJECT_HEALTH_PORT"
+GROUP_INSTANCES="$(gcloud compute instance-groups unmanaged list-instances "$TARGET_GROUP" \
+  --project="$PROJECT_ID" --zone="$ZONE" --format='value(instance.basename())' 2>/dev/null || true)"
+if ! grep -Fxq "$TARGET_VM" <<<"$GROUP_INSTANCES"; then
+  gcloud compute instance-groups unmanaged add-instances "$TARGET_GROUP" \
+    --project="$PROJECT_ID" --zone="$ZONE" --instances="$TARGET_VM"
+fi
+gcloud compute instance-groups unmanaged set-named-ports "$TARGET_GROUP" \
+  --project="$PROJECT_ID" --zone="$ZONE" --named-ports="http:$PORT"
 
-gcloud compute instance-groups managed wait-until "$ACTIVE_MIG" \
-  --project="$PROJECT_ID" --zone="$ZONE" --stable --timeout=900
+BACKEND_GROUPS="$(gcloud compute backend-services describe "$BACKEND" \
+  --project="$PROJECT_ID" --global --format='value(backends.group)')"
+if ! grep -Fq "/instanceGroups/$TARGET_GROUP" <<<"$BACKEND_GROUPS"; then
+  gcloud compute backend-services add-backend "$BACKEND" \
+    --project="$PROJECT_ID" --global \
+    --instance-group="$TARGET_GROUP" --instance-group-zone="$ZONE"
+fi
+sleep 30
 
 if [[ "$DYNATRACE_ENABLED" == "true" ]]; then
-  wait_for_dynatrace "$ACTIVE_MIG"
+  wait_for_dynatrace "$TARGET_VM"
   log "DYNATRACE_STATUS=READY"
 else
   log "DYNATRACE_STATUS=DISABLED"
 fi
 
-BACKEND_GROUPS="$(gcloud compute backend-services describe "$BACKEND" \
-  --project="$PROJECT_ID" --global --format='value(backends.group)')"
-if ! grep -Fq "/instanceGroups/$ACTIVE_MIG" <<<"$BACKEND_GROUPS"; then
-  INITIAL_CAPACITY=0
-  [[ -z "$BACKEND_GROUPS" ]] && INITIAL_CAPACITY=1
-  gcloud compute backend-services add-backend "$BACKEND" \
-    --project="$PROJECT_ID" --global \
-    --instance-group="$ACTIVE_MIG" --instance-group-zone="$ZONE" \
-    --balancing-mode=UTILIZATION --max-utilization=0.8 --capacity-scaler="$INITIAL_CAPACITY"
-fi
-
-deploy_stage 4 "Wait for $ACTIVE_MIG to pass IIS health checks"
+deploy_stage 4 "Wait for $TARGET_GROUP to pass load-balancer health checks"
 deadline=$((SECONDS + 600))
 while true; do
   HEALTH="$(gcloud compute backend-services get-health "$BACKEND" \
-    --project="$PROJECT_ID" --global --filter="group~/${ACTIVE_MIG}$" \
+    --project="$PROJECT_ID" --global --filter="group~/${TARGET_GROUP}$" \
     --format='value(status.healthStatus.healthState)' 2>/dev/null || true)"
   if grep -q HEALTHY <<<"$HEALTH"; then
     break
@@ -238,39 +189,41 @@ while true; do
   sleep 15
 done
 
-deploy_stage 5 "Switch load-balancer capacity to $ACTIVE_COLOR"
-gcloud compute backend-services update-backend "$BACKEND" \
-  --project="$PROJECT_ID" --global \
-  --instance-group="$ACTIVE_MIG" --instance-group-zone="$ZONE" --capacity-scaler=1
-
+deploy_stage 5 "Drain and remove the previous blue/green environment"
+mapfile -t OLD_GROUPS < <(
+  gcloud compute instance-groups unmanaged list --project="$PROJECT_ID" \
+    --filter="name~'^${APP_NAME}-(blue|green)-'" --format='value(name)' 2>/dev/null || true
+)
 BACKEND_GROUPS="$(gcloud compute backend-services describe "$BACKEND" \
   --project="$PROJECT_ID" --global --format='value(backends.group)')"
-if grep -Fq "/instanceGroups/$INACTIVE_MIG" <<<"$BACKEND_GROUPS"; then
-  gcloud compute backend-services update-backend "$BACKEND" \
-    --project="$PROJECT_ID" --global \
-    --instance-group="$INACTIVE_MIG" --instance-group-zone="$ZONE" --capacity-scaler=0
-fi
+for old_group in "${OLD_GROUPS[@]}"; do
+  [[ -n "$old_group" && "$old_group" != "$TARGET_GROUP" ]] || continue
+  if grep -Fq "/instanceGroups/$old_group" <<<"$BACKEND_GROUPS"; then
+    gcloud compute backend-services remove-backend "$BACKEND" \
+      --project="$PROJECT_ID" --global \
+      --instance-group="$old_group" --instance-group-zone="$ZONE"
+  fi
+  mapfile -t OLD_VMS < <(
+    gcloud compute instance-groups unmanaged list-instances "$old_group" \
+      --project="$PROJECT_ID" --zone="$ZONE" --format='value(instance.basename())' 2>/dev/null || true
+  )
+  gcloud compute instance-groups unmanaged delete "$old_group" \
+    --project="$PROJECT_ID" --zone="$ZONE" --quiet
+  for old_vm in "${OLD_VMS[@]}"; do
+    [[ -n "$old_vm" ]] || continue
+    gcloud compute instances delete "$old_vm" --project="$PROJECT_ID" --zone="$ZONE" --quiet
+  done
+done
 
-# Create the public frontend after the first backend has passed health checks.
-deploy_stage 6 "Publish and report the validated HTTP endpoint"
-if ! exists compute url-maps describe "$URL_MAP"; then
-  gcloud compute url-maps create "$URL_MAP" --project="$PROJECT_ID" --default-service="$BACKEND"
-fi
-if ! exists compute target-http-proxies describe "$PROXY"; then
-  gcloud compute target-http-proxies create "$PROXY" --project="$PROJECT_ID" --url-map="$URL_MAP"
-fi
-if ! exists compute addresses describe "$ADDRESS" --global; then
-  gcloud compute addresses create "$ADDRESS" --project="$PROJECT_ID" --global --ip-version=IPV4
-fi
-if ! exists compute forwarding-rules describe "$FORWARDING_RULE" --global; then
-  gcloud compute forwarding-rules create "$FORWARDING_RULE" \
-    --project="$PROJECT_ID" --global --address="$ADDRESS" \
-    --target-http-proxy="$PROXY" --ports=80
-fi
-
-PUBLIC_IP="$(gcloud compute addresses describe "$ADDRESS" --project="$PROJECT_ID" --global --format='value(address)')"
+deploy_stage 6 "Report the validated load-balancer endpoint"
+PUBLIC_IP="$(gcloud compute addresses describe windows-app-ip \
+  --project="$PROJECT_ID" --global --format='value(address)')"
 log "TRAFFIC_COLOR=$ACTIVE_COLOR"
 log "APP_VERSION=$ACTIVE_VERSION"
-log "PUBLIC_URL=http://$PUBLIC_IP/"
+if [[ "$LB_TYPE" == "HTTP" ]]; then
+  log "PUBLIC_URL=http://$PUBLIC_IP/"
+else
+  log "PUBLIC_ENDPOINT=$PUBLIC_IP:$PORT"
+fi
 log "[PASS] Traffic switched to $ACTIVE_COLOR version $ACTIVE_VERSION"
 log "[INFO] Rollback by reverting the deployment manifest commit and merging it"
