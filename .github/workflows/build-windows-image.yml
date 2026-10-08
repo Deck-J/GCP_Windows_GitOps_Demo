@@ -1,6 +1,8 @@
 name: Build Windows image
 run-name: Build Windows image (${{ github.sha }})
 
+# Build only from main when application or image-pipeline inputs change.
+# workflow_dispatch supports an operator-started rebuild from the Actions UI.
 on:
   push:
     branches:
@@ -9,14 +11,18 @@ on:
       - applications/sample/**
       - infrastructure/image/**
       - cloudbuild/cloudbuild-image.yaml
+      - packaging/**
   workflow_dispatch:
 
+# Grant only checkout access and the OIDC token needed for keyless GCP auth.
 permissions:
   contents: read
   id-token: write
+  packages: write
 
 jobs:
   build:
+    # Manual runs are also restricted to main so the WIF provider condition matches.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -33,6 +39,7 @@ jobs:
         uses: google-github-actions/setup-gcloud@v2
 
       - name: Submit image build to Cloud Build
+        # Repository variables configure the build; no long-lived credential is stored here.
         env:
           GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
           GCP_BUILD_SOURCE_BUCKET: ${{ vars.GCP_BUILD_SOURCE_BUCKET }}
@@ -48,10 +55,13 @@ jobs:
           BUILDER_SERVICE_ACCOUNT: ${{ vars.BUILDER_SERVICE_ACCOUNT || 'unused' }}
           KEEP_FAILED_VM: ${{ vars.KEEP_FAILED_VM || 'false' }}
         run: |
+          # Submit synchronously so Cloud Build logs stream here and its exit status
+          # becomes the GitHub Actions job conclusion.
           set -euo pipefail
           : "${GCP_PROJECT_ID:?Set the GCP_PROJECT_ID repository variable}"
           : "${GCP_BUILD_SOURCE_BUCKET:?Set the GCP_BUILD_SOURCE_BUCKET repository variable}"
           : "${CLOUD_BUILD_SERVICE_ACCOUNT:?Set the CLOUD_BUILD_SERVICE_ACCOUNT repository variable}"
+          ARTIFACT_GCS_URI="gs://${GCP_BUILD_SOURCE_BUCKET}/artifacts/sevendemo/${GITHUB_SHA}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/SevenDemo.zip"
           echo "Submitting Windows image build to Cloud Build; GitHub Actions will wait for its final status."
           gcloud builds submit . \
             --project="$GCP_PROJECT_ID" \
@@ -60,9 +70,91 @@ jobs:
             --gcs-source-staging-dir="gs://${GCP_BUILD_SOURCE_BUCKET}/source" \
             --service-account="projects/${GCP_PROJECT_ID}/serviceAccounts/${CLOUD_BUILD_SERVICE_ACCOUNT}" \
             --config=cloudbuild/cloudbuild-image.yaml \
-            --substitutions="_ZONE=${GCP_ZONE},_SOURCE_IMAGE_FAMILY=${SOURCE_IMAGE_FAMILY},_IMAGE_FAMILY=${IMAGE_FAMILY},_RUNNER_VERSION=${RUNNER_VERSION},_VS_INSTALL_MODE=${VS_INSTALL_MODE},_VS_EDITION=${VS_EDITION},_VS_MEDIA_URI=${VS_MEDIA_URI},_VS_PRODUCT_KEY_SECRET=${VS_PRODUCT_KEY_SECRET},_BUILDER_SERVICE_ACCOUNT=${BUILDER_SERVICE_ACCOUNT},_KEEP_FAILED_VM=${KEEP_FAILED_VM},_SOURCE_REVISION=${GITHUB_SHA}"
+            --substitutions="_ZONE=${GCP_ZONE},_SOURCE_IMAGE_FAMILY=${SOURCE_IMAGE_FAMILY},_IMAGE_FAMILY=${IMAGE_FAMILY},_RUNNER_VERSION=${RUNNER_VERSION},_VS_INSTALL_MODE=${VS_INSTALL_MODE},_VS_EDITION=${VS_EDITION},_VS_MEDIA_URI=${VS_MEDIA_URI},_VS_PRODUCT_KEY_SECRET=${VS_PRODUCT_KEY_SECRET},_BUILDER_SERVICE_ACCOUNT=${BUILDER_SERVICE_ACCOUNT},_KEEP_FAILED_VM=${KEEP_FAILED_VM},_SOURCE_REVISION=${GITHUB_SHA},_ARTIFACT_GCS_URI=${ARTIFACT_GCS_URI}"
+
+      - name: Check whether this build creates SevenDemo
+        id: sevendemo
+        env:
+          VS_INSTALL_MODE: ${{ vars.VS_INSTALL_MODE || 'web-community' }}
+        run: |
+          set -euo pipefail
+          PROJECT_MODE="$(jq -r '.mode // "sample"' applications/sample/project.json)"
+          if [[ "$PROJECT_MODE" == "sample" && "$VS_INSTALL_MODE" != "disabled" ]]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download validated SevenDemo artifact
+        if: steps.sevendemo.outputs.available == 'true'
+        env:
+          GCP_BUILD_SOURCE_BUCKET: ${{ vars.GCP_BUILD_SOURCE_BUCKET }}
+        run: |
+          set -euo pipefail
+          ARTIFACT_GCS_URI="gs://${GCP_BUILD_SOURCE_BUCKET}/artifacts/sevendemo/${GITHUB_SHA}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/SevenDemo.zip"
+          mkdir -p package-input
+          gcloud storage cp "$ARTIFACT_GCS_URI" package-input/SevenDemo.zip
+          test -s package-input/SevenDemo.zip
+
+      - name: Set up .NET SDK for NuGet packaging
+        if: steps.sevendemo.outputs.available == 'true'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Pack and publish SevenDemo to GitHub Packages
+        id: publish-sevendemo
+        if: steps.sevendemo.outputs.available == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          APP_VERSION="$(tr -d '[:space:]' < applications/sample/VERSION)"
+          PACKAGE_VERSION="${APP_VERSION}-ci.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          echo "package_version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+          dotnet pack packaging/SevenDemo.Package.csproj \
+            --configuration Release \
+            --output "$RUNNER_TEMP/sevendemo-packages" \
+            -p:PackageVersion="$PACKAGE_VERSION"
+          dotnet nuget push "$RUNNER_TEMP/sevendemo-packages/"*.nupkg \
+            --api-key "$GITHUB_TOKEN" \
+            --source "https://nuget.pkg.github.com/${GITHUB_REPOSITORY_OWNER}/index.json"
+          echo "Published gcp-windows-gitops-demo-sevendemo ${PACKAGE_VERSION} to GitHub Packages." \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Mock upload SevenDemo ZIP to Conexus
+        if: steps.sevendemo.outputs.available == 'true'
+        env:
+          PACKAGE_VERSION: ${{ steps.publish-sevendemo.outputs.package_version }}
+        run: |
+          set -euo pipefail
+          ZIP_PATH="package-input/SevenDemo.zip"
+          test -s "$ZIP_PATH"
+          ZIP_SHA256="$(sha256sum "$ZIP_PATH" | cut -d ' ' -f 1)"
+          MOCK_RECEIPT="$RUNNER_TEMP/conexus-mock-upload.txt"
+          {
+            echo "status=SIMULATED"
+            echo "target=Conexus artifact repository"
+            echo "file=SevenDemo.zip"
+            echo "package=gcp-windows-gitops-demo-sevendemo"
+            echo "version=${PACKAGE_VERSION}"
+            echo "sha256=${ZIP_SHA256}"
+            echo "uploaded=false"
+          } > "$MOCK_RECEIPT"
+          cat "$MOCK_RECEIPT"
+          {
+            echo "### Conexus upload (mock)"
+            echo
+            echo "Simulated handoff of \`SevenDemo.zip\` (SHA-256 \`${ZIP_SHA256}\`) for package version \`${PACKAGE_VERSION}\`."
+            echo "No request was sent to Conexus; this step used no endpoint or credentials."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report skipped package publication
+        if: steps.sevendemo.outputs.available != 'true'
+        run: echo "SevenDemo package publication skipped (sample project mode with Visual Studio is required)." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Report GitHub Actions conclusion
+        # Always leave a short result in the run summary, including on submission failure.
         if: always()
         env:
           JOB_STATUS: ${{ job.status }}

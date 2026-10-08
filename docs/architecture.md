@@ -10,6 +10,7 @@ sequenceDiagram
     participant Build as Cloud Build
     participant Win as Temporary Windows VM in GCP
     participant GCE as Compute Engine runtime
+    participant Mgmt as Optional private management station
     participant DT as Dynatrace
     participant DevLB as Dev load balancer
     participant ProdLB as Prod load balancer
@@ -27,11 +28,19 @@ sequenceDiagram
         Git->>Actions: Dev manifest push
         Actions->>Build: Submit deployment with Workload Identity Federation
         Build->>GCE: Reconcile Dev color and backend
+        opt Dev management station enabled
+            Build->>Mgmt: Ensure private station and IAP-only RDP ingress
+            Mgmt->>GCE: RDP to private Dev workers
+        end
         Build->>DevLB: Publish Dev endpoint
     else Prod manifest changed
         Git->>Actions: Prod manifest push
         Actions->>Build: Submit deployment with Workload Identity Federation
         Build->>GCE: Reconcile Prod color and backend
+        opt Prod management station enabled
+            Build->>Mgmt: Ensure private station and IAP-only RDP ingress
+            Mgmt->>GCE: RDP to private Prod workers
+        end
         Build->>ProdLB: Publish Prod endpoint
     end
     opt Dynatrace enabled

@@ -17,6 +17,8 @@ $bootstrapperUris = @{
     Community    = 'https://aka.ms/vs/17/release/vs_community.exe'
 }
 
+# Build and verify an edition-specific offline layout from the checked-in
+# workload configuration; edition and output paths remain operator-selectable.
 # Build the layout locally on Windows because producing the ISO requires the
 # Windows ADK's oscdimg.exe; the generated image is uploaded to the restricted
 # bucket read by the temporary image-builder identity.

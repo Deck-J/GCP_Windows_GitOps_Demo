@@ -1,5 +1,7 @@
 # Project hook for custom image smoke tests.
 # Replace this file with checks that prove the application works on the captured image.
+# This hook runs during image creation and again after booting the captured image.
+# Emit PROJECT_VALIDATE_PASS only after deterministic checks succeed; throw on failure.
 param(
     [Parameter(Mandatory = $true)][string]$InstallRoot,
     [Parameter(Mandatory = $true)][string]$AppVersion

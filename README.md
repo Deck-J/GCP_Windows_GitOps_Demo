@@ -126,9 +126,25 @@ Register each runner at instance startup with a short-lived token.
 
 ## Prerequisites
 
-1. Enable the Compute Engine and Cloud Build APIs.
-2. Select a dedicated Cloud Build service account.
-3. Grant that account enough access to create/delete instances, templates,
+### Required Google Cloud APIs
+
+Enable these APIs in the project:
+
+`cloudbuild.googleapis.com`, `compute.googleapis.com`, `iam.googleapis.com`,
+`iamcredentials.googleapis.com`, `iap.googleapis.com`,
+`secretmanager.googleapis.com`, `storage.googleapis.com`, and
+`sts.googleapis.com`.
+
+```bash
+gcloud services enable \
+  cloudbuild.googleapis.com compute.googleapis.com iam.googleapis.com \
+  iamcredentials.googleapis.com iap.googleapis.com \
+  secretmanager.googleapis.com storage.googleapis.com sts.googleapis.com \
+  --project=PROJECT_ID
+```
+
+1. Select a dedicated Cloud Build service account.
+2. Grant that account enough access to create/delete instances, templates,
    managed instance groups, health checks, firewall rules, load-balancer
    resources, disks and images. For an MVP, `roles/compute.instanceAdmin.v1`
    plus the permissions required to create global load-balancer resources is
@@ -137,16 +153,16 @@ Register each runner at instance startup with a short-lived token.
   service accounts it must attach. Replace broad roles with a custom role for
   production. The administrator configuring Workload Identity Federation needs
   permission to manage the pool, provider, and service-account bindings.
-4. Ensure quota for one `n2-standard-8` builder, one `e2-standard-4`
+3. Ensure quota for one `n2-standard-8` builder, one `e2-standard-4`
    smoke-test VM, and six `e2-standard-2` IIS workers (four Prod plus two Dev)
    with 200 GB balanced disks. Blue/green rollouts temporarily overlap old and
    new workers, so allow for up to twelve runtime VMs during concurrent
    deployments. Each environment also needs a global load balancer.
-5. Grant the GitHub Actions submitter service account permission to submit
+4. Grant the GitHub Actions submitter service account permission to submit
    Cloud Build jobs and act as the dedicated Cloud Build execution service
    account. Configure the repository-restricted Workload Identity Federation
    trust described below; do not create or upload a service-account key.
-6. Ensure the selected subnet permits outbound HTTPS. The MVP uses ephemeral
+5. Ensure the selected subnet permits outbound HTTPS. The MVP uses ephemeral
    external IP addresses; replace those with a private subnet plus Cloud NAT
    for an enterprise implementation.
 
@@ -164,7 +180,10 @@ application change to `main` starts the `Build Windows image` workflow, which
 submits the image config to Cloud Build and waits for the result. Its GitHub
 Actions run reports queued/in-progress/completed status and a success or failure
 conclusion, while streaming the Cloud Build logs. The logs contain the
-immutable image name. Update the inactive color's image and version plus
+immutable image name. After the image passes its smoke test, the workflow also
+retrieves the published SevenDemo ZIP from the staging bucket, wraps it in a
+versioned NuGet package, and pushes that package to GitHub Packages using the
+workflow's `GITHUB_TOKEN`. Update the inactive color's image and version plus
 `ACTIVE_COLOR` in the target environment's manifest, then submit that change as
 a reviewed pull request. A matching manifest push starts that environment's
 deployment workflow; Dev and Prod run independently using the `NODE_COUNT` in
@@ -179,7 +198,8 @@ allowing deployment-state changes.
 All authenticated workflows use Workload Identity Federation; no
 service-account key is stored in GitHub. Create a dedicated service account
 for GitHub Actions to submit builds. Give it only permission to submit builds,
-use the project, and act as the Cloud Build execution service account:
+use the project, stage build sources and download the staged demo artifact, and
+act as the Cloud Build execution service account:
 
 ```bash
 PROJECT_ID=your-project-id
@@ -198,8 +218,14 @@ gcloud storage buckets add-iam-policy-binding "gs://${GCP_BUILD_SOURCE_BUCKET}" 
   --member="serviceAccount:${GITHUB_ACTIONS_SA}" \
   --role=roles/storage.objectCreator
 gcloud storage buckets add-iam-policy-binding "gs://${GCP_BUILD_SOURCE_BUCKET}" \
+  --member="serviceAccount:${GITHUB_ACTIONS_SA}" \
+  --role=roles/storage.objectViewer
+gcloud storage buckets add-iam-policy-binding "gs://${GCP_BUILD_SOURCE_BUCKET}" \
   --member="serviceAccount:service-${PROJECT_NUMBER}@gcp-sa-cloudbuild.iam.gserviceaccount.com" \
   --role=roles/storage.objectViewer
+gcloud storage buckets add-iam-policy-binding "gs://${GCP_BUILD_SOURCE_BUCKET}" \
+  --member="serviceAccount:${CLOUD_BUILD_SA}" \
+  --role=roles/storage.objectCreator
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${GITHUB_ACTIONS_SA}" \
   --role=roles/cloudbuild.builds.editor
@@ -235,12 +261,21 @@ In the GitHub repository, add these **Actions variables** under
 | `GCP_WIF_PROVIDER` | `projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-actions/providers/github` |
 | `GCP_WIF_SERVICE_ACCOUNT` | The `github-actions-submitter` service-account email |
 | `CLOUD_BUILD_SERVICE_ACCOUNT` | The Cloud Build execution service-account email |
+| `DEV_MANAGEMENT_STATION_ENABLED` | `true` to deploy the persistent Dev management station; defaults to `false` |
+| `PROD_MANAGEMENT_STATION_ENABLED` | `true` to deploy the persistent Prod management station; defaults to `false` |
 
 The provider condition restricts identity federation to this repository's
 `main` branch. Build and deployment workflows run on matching pushes to
 `main` and can also be started manually from the Actions tab with `main`
 selected. Repository validation runs directly in GitHub Actions and does not
 need GCP credentials.
+
+The GitHub Actions submitter needs object-creator access to stage Cloud Build
+sources and object-viewer access to retrieve the validated SevenDemo ZIP.
+The Cloud Build execution service account needs object-creator access to stage
+that ZIP. The workflow also needs the `packages: write` permission to publish
+to the repository's GitHub Packages NuGet registry; this is granted through
+the automatically provided `GITHUB_TOKEN`, not a personal access token.
 
 ### GitHub Actions run control
 
@@ -431,6 +466,26 @@ to `C:\ImageMetadata\seven-demo-build.json`, with the `devenv.com` output in
 the IDE build proof exists and executes the same compiled DLL again before the
 image can be promoted.
 
+When Visual Studio is enabled, the image-build workflow publishes the validated
+`SevenDemo.zip` inside the NuGet package
+`gcp-windows-gitops-demo-sevendemo`. Package versions combine the application
+version with the unique Actions run number and attempt (for example,
+`1.0.0-ci.42.1`), allowing repeated builds of the same app version to be
+published separately. In GitHub Packages, use the NuGet registry for this
+repository; the `.nupkg` contains the application archive at
+`tools/SevenDemo.zip`. A build with `VS_INSTALL_MODE=disabled` skips package
+publication because it does not produce the compiled demo.
+
+### Conexus upload demonstration (mock)
+
+After publishing to GitHub Packages, the image-build workflow runs a mock
+Conexus handoff for `SevenDemo.zip`. It prints a simulated receipt with the
+package version and ZIP SHA-256 in the GitHub Actions summary. This is
+demonstration-only: it does not connect to Conexus, transmit the file, require
+an endpoint, or use credentials. Replace this step with your enterprise
+Conexus upload command and approved authentication when the target repository
+details are available.
+
 .NET 7 is out of support, so this target is appropriate for demonstrating the
 requested legacy toolchain, not for a new production application.
 
@@ -573,6 +628,38 @@ tab after selecting the `main` branch.
 A successful deployment is reported only after the 10-minute viewing window
 and worker teardown complete. If deployment or validation fails, cleanup still
 runs and the original failure is returned.
+
+### Optional RDP management station
+
+Set `DEV_MANAGEMENT_STATION_ENABLED=true` or
+`PROD_MANAGEMENT_STATION_ENABLED=true` in GitHub Actions repository variables
+to enable a persistent Windows Server 2022 management station for that
+environment. The next deployment creates the station without an external IP,
+allows inbound RDP to it only from Google's IAP TCP forwarding range, and
+allows worker RDP only from the station's network tag. It prints the station
+name, private IP, and IAP tunnel command in the deployment logs. Leave the
+flag unset or set it to `false` to remove that environment's station and RDP
+firewall rules on its next deployment.
+
+An authorized operator needs IAP TCP forwarding access and permission to
+reset Windows passwords. Run these commands from an authenticated administrator
+terminal, not from GitHub Actions; the generated passwords are sensitive:
+
+```bash
+gcloud compute reset-windows-password dev-iis-demo-management \
+  --project=PROJECT_ID --zone=ZONE --user=gitops-admin
+gcloud compute start-iap-tunnel dev-iis-demo-management 3389 \
+  --local-host-port=localhost:3389 --project=PROJECT_ID --zone=ZONE
+```
+
+Connect an RDP client to `localhost:3389`. From the station, RDP to a worker's
+private IP. Reset a Windows password for each worker from the administrator
+terminal when needed; never put generated passwords in Actions variables or
+build logs. The application's workers retain their normal 10-minute demo
+teardown, so the management station remains available but worker RDP is only
+possible while that deployment's workers are running. The persistent Windows
+station continues to incur compute and disk charges until a deployment runs
+with its flag disabled.
 
 The one-time networking setup creates a dedicated MVP HTTP load balancer for
 each environment. Deployment logs print the selected environment's public IP.

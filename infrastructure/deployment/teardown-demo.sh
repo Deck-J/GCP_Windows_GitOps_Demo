@@ -22,6 +22,8 @@ fi
 BACKEND="${APP_NAME}-backend"
 FAILED=0
 
+# Keep existence checks project-scoped and use them only for persistent
+# resources whose attachment state determines whether teardown can proceed.
 exists() {
   gcloud "$@" --project="$PROJECT_ID" >/dev/null 2>&1
 }
@@ -73,6 +75,8 @@ for group in "${GROUPS[@]}"; do
   done
 done
 
+# These are Day-0 environment resources; they intentionally survive each
+# demonstration so later GitOps runs can reuse the same public endpoint.
 log "[TEARDOWN 2/2] Preserve Day-0 load-balancer, health-check and firewall resources"
 
 if [[ "$FAILED" -ne 0 ]]; then

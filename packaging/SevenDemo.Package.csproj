@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <PackageId>gcp-windows-gitops-demo-sevendemo</PackageId>
+    <Authors>Deck-J</Authors>
+    <Description>Published SevenDemo application ZIP produced by the Windows image build.</Description>
+    <PackageProjectUrl>https://github.com/Deck-J/GCP_Windows_GitOps_Demo</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Deck-J/GCP_Windows_GitOps_Demo</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>windows;demo;artifact</PackageTags>
+    <IsPackable>true</IsPackable>
+    <IsTool>false</IsTool>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../package-input/SevenDemo.zip"
+          Pack="true"
+          PackagePath="tools/SevenDemo.zip" />
+  </ItemGroup>
+</Project>

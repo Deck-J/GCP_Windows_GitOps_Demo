@@ -43,6 +43,7 @@ VS_EDITION="${11:-enterprise}"
 VS_MEDIA_URI="${12:-}"
 VS_PRODUCT_KEY_SECRET="${13:-}"
 BUILDER_SERVICE_ACCOUNT="${14:-}"
+ARTIFACT_GCS_URI="${15:-disabled}"
 NETWORK="${NETWORK:-default}"
 SUBNET="${SUBNET:-default}"
 
@@ -68,6 +69,8 @@ if [[ "$APP_VERSION" != "$REPO_APP_VERSION" ]]; then
   exit 1
 fi
 
+# Build deterministic resource names from the Cloud Build ID, app version,
+# and source revision so concurrent or repeated builds do not collide.
 BUILD_TOKEN="$(printf '%s' "$BUILD_ID_RAW" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-' | cut -c1-18)"
 BUILD_VM="win-image-${BUILD_TOKEN}"
 TEST_VM="win-test-${BUILD_TOKEN}"
@@ -108,12 +111,16 @@ MANAGEMENT_VM_CREATED=false
 SSH_USER='gcebuilder'
 SSH_KEY_DIR=''
 SSH_KEY_FILE=''
+ARTIFACT_TEMP_DIR=''
+ARTIFACT_LOCAL_PATH=''
 declare -A SERIAL_LINES_SEEN=()
 
 cleanup() {
   local exit_code=$?
   set +e
 
+  # Keep an explicitly requested management VM, otherwise remove only resources
+  # created for this unique build and discard its ephemeral SSH private key.
   if [[ "$MANAGEMENT_MODE" == "true" && "$MANAGEMENT_VM_CREATED" == "true" ]]; then
     log "[CLEANUP] Preserving management VM $BUILD_VM and its IAP RDP firewall rule"
   elif [[ "$exit_code" -ne 0 && "$KEEP_FAILED_VM" == "true" ]]; then
@@ -142,6 +149,9 @@ cleanup() {
   if [[ -n "$SSH_KEY_DIR" ]]; then
     rm -rf "$SSH_KEY_DIR"
   fi
+  if [[ -n "$ARTIFACT_TEMP_DIR" ]]; then
+    rm -rf "$ARTIFACT_TEMP_DIR"
+  fi
 
   exit "$exit_code"
 }
@@ -152,6 +162,8 @@ serial_output() {
     --project="$PROJECT_ID" --zone="$ZONE" --port=1 2>/dev/null || true
 }
 
+# Serial output is the status channel for Windows startup and Sysprep, since the
+# private builder has neither a public IP nor a persistent SSH server.
 emit_serial_progress() {
   local vm_name="$1"
   local output="$2"
@@ -267,6 +279,19 @@ copy_to_vm() {
     --scp-flag='-o StrictHostKeyChecking=no'
 }
 
+copy_from_vm() {
+  local vm_name="$1"
+  local source_path="$2"
+  local destination_path="$3"
+  gcloud compute scp "$SSH_USER@$vm_name:$source_path" "$destination_path" \
+    --project="$PROJECT_ID" --zone="$ZONE" \
+    --tunnel-through-iap --quiet --ssh-key-file="$SSH_KEY_FILE" \
+    --scp-flag='-o UserKnownHostsFile=/dev/null' \
+    --scp-flag='-o StrictHostKeyChecking=no'
+}
+
+# The key is unique to this pipeline run and is sent only through metadata as a
+# public key; all subsequent builder access uses IAP-tunneled SSH.
 pipeline_stage 1 "Validate inputs and prepare immutable image name $IMAGE_NAME"
 SSH_KEY_DIR="$(mktemp -d)"
 SSH_KEY_FILE="$SSH_KEY_DIR/id_ed25519"
@@ -342,6 +367,8 @@ SOURCE_DISK="$(gcloud compute instances describe "$BUILD_VM" \
   --format='value(disks[0].source.basename())')"
 
 pipeline_stage 4 "Capture immutable image $IMAGE_NAME"
+# Capture only after the builder has shut down through GCE Sysprep, then validate
+# the resulting image on a fresh VM before publishing success.
 gcloud compute images create "$IMAGE_NAME" \
   --project="$PROJECT_ID" \
   --source-disk="$SOURCE_DISK" \
@@ -366,6 +393,13 @@ gcloud compute instances create "$TEST_VM" \
   --metadata-from-file=windows-startup-script-ps1=infrastructure/image/windows/ssh-bootstrap.ps1
 
 wait_for_marker "$TEST_VM" "SSH_BOOTSTRAP_READY" "SSH_BOOTSTRAP_FAILED:" "$TEST_TIMEOUT_SECONDS"
+# Retrieve the ZIP from the freshly booted image while its one-time SSH access
+# is active; only a successful smoke test is eligible for publication.
+if [[ "$PROJECT_MODE" == "sample" && "$VS_INSTALL_MODE" != "disabled" && "$ARTIFACT_GCS_URI" != "disabled" ]]; then
+  ARTIFACT_TEMP_DIR="$(mktemp -d)"
+  ARTIFACT_LOCAL_PATH="$ARTIFACT_TEMP_DIR/SevenDemo.zip"
+  copy_from_vm "$TEST_VM" 'C:/DemoArtifacts/SevenDemo.zip' "$ARTIFACT_LOCAL_PATH"
+fi
 copy_to_vm "$TEST_VM" infrastructure/image/windows/smoke-test.ps1 'C:/ImageBuild/smoke-test.ps1'
 set +e
 ssh_command "$TEST_VM" 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/ImageBuild/smoke-test.ps1' | tee "$TEST_VM-ssh.log"
@@ -377,6 +411,12 @@ if ! grep -Fq 'SMOKE_TEST_PASS' "$TEST_VM-ssh.log"; then
 fi
 log "[$TEST_VM] [PASS] SSH smoke test reported SMOKE_TEST_PASS"
 wait_for_terminated "$TEST_VM" 300
+
+if [[ -n "$ARTIFACT_LOCAL_PATH" ]]; then
+  log "[ARTIFACT] Uploading validated SevenDemo ZIP to $ARTIFACT_GCS_URI"
+  gcloud storage cp "$ARTIFACT_LOCAL_PATH" "$ARTIFACT_GCS_URI" --project="$PROJECT_ID"
+  log "[PASS] SevenDemo ZIP staged for GitHub Packages publication"
+fi
 
 BUILD_SUCCEEDED=true
 pipeline_stage 6 "Publish build result"

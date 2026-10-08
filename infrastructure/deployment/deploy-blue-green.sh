@@ -16,12 +16,19 @@ DYNATRACE_MONITORING_MODE="${8:-fullstack}"
 DYNATRACE_HOST_GROUP="${9:-gcp-windows-demo}"
 DYNATRACE_NETWORK_ZONE="${10:-disabled}"
 MANIFEST="${11:-environments/prod/deployment.env}"
+MANAGEMENT_STATION_ENABLED="${12:-false}"
 [[ -f "$MANIFEST" ]] || { printf '[FAIL] Deployment manifest does not exist: %s\n' "$MANIFEST" >&2; exit 2; }
 PROJECT_HEALTH_PATH="$(jq -r '.healthPath // "/health.html"' applications/sample/project.json)"
 PROJECT_HEALTH_PORT="$(jq -r '.healthPort // 80' applications/sample/project.json)"
 NETWORK="${NETWORK:-default}"
 SUBNET="${SUBNET:-default}"
+MANAGEMENT_VM="${APP_NAME}-management"
+MANAGEMENT_TAG="${APP_NAME}-management"
+MANAGEMENT_IAP_FIREWALL="${APP_NAME}-management-iap-rdp"
+WORKER_RDP_FIREWALL="${APP_NAME}-workers-management-rdp"
 
+# Logs are machine-readable enough for Cloud Build status extraction while
+# retaining timestamps and human-readable context for operators.
 log() {
   printf '[%s] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*"
 }
@@ -39,6 +46,8 @@ LB_TYPE="${LB_TYPE:-HTTP}"
 HEALTH_CHECK_PATH="${HEALTH_CHECK_PATH:-$PROJECT_HEALTH_PATH}"
 PORT="${PORT:-$PROJECT_HEALTH_PORT}"
 
+# Resolve the selected color's image/version from the desired-state manifest.
+# The deployment never mutates the manifest; promotion is a reviewed Git change.
 if [[ "${ACTIVE_COLOR:-}" != "blue" && "${ACTIVE_COLOR:-}" != "green" ]]; then
   log "[FAIL] ACTIVE_COLOR must be blue or green"
   exit 1
@@ -55,10 +64,10 @@ BACKEND="${APP_NAME}-backend"
 ADDRESS="${APP_NAME}-ip"
 VERSION_TOKEN="$(printf '%s' "$ACTIVE_VERSION" | tr '[:upper:].+_' '[:lower:]---' | tr -cd 'a-z0-9-' | cut -c1-10)"
 IMAGE_TOKEN="$(basename "$ACTIVE_IMAGE" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-' | tail -c 11)"
-TARGET_GROUP="${APP_NAME}-${ACTIVE_COLOR}-n${MIG_SIZE}-${VERSION_TOKEN}-${IMAGE_TOKEN}"
-TARGET_GROUP="$(printf '%s' "$TARGET_GROUP" | cut -c1-60 | sed 's/-$//')"
 MIG_SIZE="${NODE_COUNT:-}"
 [[ "$MIG_SIZE" =~ ^[1-9][0-9]*$ ]] || { log "[FAIL] NODE_COUNT must be a positive integer in $MANIFEST"; exit 1; }
+TARGET_GROUP="${APP_NAME}-${ACTIVE_COLOR}-n${MIG_SIZE}-${VERSION_TOKEN}-${IMAGE_TOKEN}"
+TARGET_GROUP="$(printf '%s' "$TARGET_GROUP" | cut -c1-60 | sed 's/-$//')"
 TARGET_VMS=()
 for ((node_index = 1; node_index <= MIG_SIZE; node_index++)); do
   TARGET_VMS+=("$(printf '%s-%02d' "$TARGET_GROUP" "$node_index")")
@@ -69,6 +78,8 @@ exists() {
 }
 
 validate_dynatrace_settings() {
+  # Optional monitoring is validated before resource changes to avoid partial
+  # deployments caused by malformed runtime configuration.
   [[ "$DYNATRACE_ENABLED" =~ ^(true|false)$ ]] || { log "[FAIL] DYNATRACE_ENABLED must be true or false"; return 1; }
   [[ "$DYNATRACE_ENABLED" == "false" ]] && return 0
 
@@ -107,6 +118,10 @@ wait_for_dynatrace() {
 }
 
 validate_dynatrace_settings
+[[ "$MANAGEMENT_STATION_ENABLED" =~ ^(true|false)$ ]] || {
+  log "[FAIL] MANAGEMENT_STATION_ENABLED must be true or false"
+  exit 1
+}
 [[ "$LB_TYPE" =~ ^(HTTP|TCP)$ ]] || { log "[FAIL] LB_TYPE must be HTTP or TCP"; exit 1; }
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
   log "[FAIL] PORT must be between 1 and 65535"
@@ -125,8 +140,53 @@ exists compute health-checks describe "$HEALTH_CHECK" || { log "[FAIL] Run infra
 exists compute backend-services describe "$BACKEND" --global || { log "[FAIL] Required backend service $BACKEND does not exist"; exit 1; }
 
 deploy_stage 3 "Create $MIG_SIZE private IIS nodes and unmanaged instance group $TARGET_GROUP"
+# The station has no public IP. IAP is the only ingress path to it, and its
+# network tag is the sole permitted source for worker RDP traffic.
+if [[ "$MANAGEMENT_STATION_ENABLED" == "true" ]]; then
+  if ! exists compute firewall-rules describe "$MANAGEMENT_IAP_FIREWALL"; then
+    gcloud compute firewall-rules create "$MANAGEMENT_IAP_FIREWALL" \
+      --project="$PROJECT_ID" --network="$NETWORK" --direction=INGRESS \
+      --action=ALLOW --rules=tcp:3389 --source-ranges=35.235.240.0/20 \
+      --target-tags="$MANAGEMENT_TAG"
+  fi
+  if ! exists compute firewall-rules describe "$WORKER_RDP_FIREWALL"; then
+    gcloud compute firewall-rules create "$WORKER_RDP_FIREWALL" \
+      --project="$PROJECT_ID" --network="$NETWORK" --direction=INGRESS \
+      --action=ALLOW --rules=tcp:3389 --source-tags="$MANAGEMENT_TAG" \
+      --target-tags=allow-rdp
+  fi
+  if ! exists compute instances describe "$MANAGEMENT_VM" --zone="$ZONE"; then
+    gcloud compute instances create "$MANAGEMENT_VM" \
+      --project="$PROJECT_ID" --zone="$ZONE" \
+      --machine-type=e2-standard-2 \
+      --image-family=windows-2022 --image-project=windows-cloud \
+      --network="$NETWORK" --subnet="$SUBNET" --no-address \
+      --boot-disk-size=100GB --boot-disk-type=pd-balanced \
+      --no-service-account --no-scopes --tags="$MANAGEMENT_TAG"
+  fi
+  MANAGEMENT_IP="$(gcloud compute instances describe "$MANAGEMENT_VM" \
+    --project="$PROJECT_ID" --zone="$ZONE" \
+    --format='value(networkInterfaces[0].networkIP)')"
+  log "[MANAGEMENT] Persistent private station: $MANAGEMENT_VM ($MANAGEMENT_IP)"
+  log "[MANAGEMENT] IAP tunnel: gcloud compute start-iap-tunnel $MANAGEMENT_VM 3389 --local-host-port=localhost:3389 --project=$PROJECT_ID --zone=$ZONE"
+  log "[MANAGEMENT] Connect an RDP client to localhost:3389, then RDP from the station to a worker's private IP."
+else
+  for rule in "$MANAGEMENT_IAP_FIREWALL" "$WORKER_RDP_FIREWALL"; do
+    if exists compute firewall-rules describe "$rule"; then
+      gcloud compute firewall-rules delete "$rule" \
+        --project="$PROJECT_ID" --quiet
+    fi
+  done
+  if exists compute instances describe "$MANAGEMENT_VM" --zone="$ZONE"; then
+    gcloud compute instances delete "$MANAGEMENT_VM" \
+      --project="$PROJECT_ID" --zone="$ZONE" --quiet
+  fi
+fi
+
 SERVICE_ACCOUNT_ARGS=(--no-service-account --no-scopes)
 STARTUP_ARGS=()
+# Worker metadata contains non-secret runtime configuration. Dynatrace-enabled
+# VMs receive a narrowly scoped identity only so startup can read its token secret.
 METADATA="app-environment=$(basename "$(dirname "$MANIFEST")"),app-color=${ACTIVE_COLOR},app-version=${ACTIVE_VERSION}"
 if [[ "$DYNATRACE_ENABLED" == "true" ]]; then
   SERVICE_ACCOUNT_ARGS=(--service-account="$DYNATRACE_RUNTIME_SERVICE_ACCOUNT" --scopes=cloud-platform)
@@ -140,23 +200,49 @@ if ! exists compute instance-groups unmanaged describe "$TARGET_GROUP" --zone="$
   gcloud compute instance-groups unmanaged create "$TARGET_GROUP" \
     --project="$PROJECT_ID" --zone="$ZONE" --network="$NETWORK"
 fi
+# Reuse a matching target group/VM set when possible, then attach only the
+# selected deployment's workers to the persistent backend service.
 for target_vm in "${TARGET_VMS[@]}"; do
-  if ! exists compute instances describe "$target_vm" --zone="$ZONE"; then
+  TARGET_VM_EXISTS=false
+  if exists compute instances describe "$target_vm" --zone="$ZONE"; then
+    TARGET_VM_EXISTS=true
+  else
+    WORKER_TAGS=allow-health-check
+    [[ "$MANAGEMENT_STATION_ENABLED" == "true" ]] && WORKER_TAGS+=,allow-rdp
     gcloud compute instances create "$target_vm" \
       --project="$PROJECT_ID" --zone="$ZONE" \
       --machine-type=e2-standard-2 --image="$ACTIVE_IMAGE" \
       --network="$NETWORK" --subnet="$SUBNET" --no-address \
       --boot-disk-size=200GB --boot-disk-type=pd-balanced \
-      --tags="allow-health-check" \
+      --tags="$WORKER_TAGS" \
       "${SERVICE_ACCOUNT_ARGS[@]}" \
       --metadata="$METADATA" \
       "${STARTUP_ARGS[@]}"
+  fi
+  if [[ "$TARGET_VM_EXISTS" == "true" ]]; then
+    TARGET_VM_TAGS="$(gcloud compute instances describe "$target_vm" \
+      --project="$PROJECT_ID" --zone="$ZONE" --format='value(tags.items)')"
+    if [[ "$MANAGEMENT_STATION_ENABLED" == "true" ]]; then
+      if ! grep -Fxq allow-rdp <<<"$TARGET_VM_TAGS"; then
+        gcloud compute instances add-tags "$target_vm" \
+          --project="$PROJECT_ID" --zone="$ZONE" --tags=allow-rdp
+      fi
+    elif grep -Fxq allow-rdp <<<"$TARGET_VM_TAGS"; then
+      gcloud compute instances remove-tags "$target_vm" \
+        --project="$PROJECT_ID" --zone="$ZONE" --tags=allow-rdp
+    fi
   fi
   GROUP_INSTANCES="$(gcloud compute instance-groups unmanaged list-instances "$TARGET_GROUP" \
     --project="$PROJECT_ID" --zone="$ZONE" --format='value(instance.basename())' 2>/dev/null || true)"
   if ! grep -Fxq "$target_vm" <<<"$GROUP_INSTANCES"; then
     gcloud compute instance-groups unmanaged add-instances "$TARGET_GROUP" \
       --project="$PROJECT_ID" --zone="$ZONE" --instances="$target_vm"
+  fi
+  if [[ "$MANAGEMENT_STATION_ENABLED" == "true" ]]; then
+    WORKER_IP="$(gcloud compute instances describe "$target_vm" \
+      --project="$PROJECT_ID" --zone="$ZONE" \
+      --format='value(networkInterfaces[0].networkIP)')"
+    log "[MANAGEMENT] RDP target: $target_vm ($WORKER_IP)"
   fi
 done
 gcloud compute instance-groups unmanaged set-named-ports "$TARGET_GROUP" \
@@ -181,6 +267,8 @@ else
 fi
 
 deploy_stage 4 "Wait for $TARGET_GROUP to pass load-balancer health checks"
+# Do not remove the previous color until every requested new worker is healthy;
+# on timeout the old backend remains available for rollback.
 deadline=$((SECONDS + 600))
 while true; do
   HEALTH="$(gcloud compute backend-services get-health "$BACKEND" \
@@ -198,6 +286,8 @@ while true; do
 done
 
 deploy_stage 5 "Drain and remove the previous blue/green environment"
+# The backend switch is complete before retiring old groups, minimizing the
+# interval in which the load balancer has no healthy application workers.
 mapfile -t OLD_GROUPS < <(
   gcloud compute instance-groups unmanaged list --project="$PROJECT_ID" \
     --filter="name~'^${APP_NAME}-(blue|green)-'" --format='value(name)' 2>/dev/null || true

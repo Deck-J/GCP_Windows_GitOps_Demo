@@ -16,6 +16,8 @@ function Write-DemoInfo([string]$Message) {
     Write-Output "DEMO_INFO|$Message"
 }
 
+# Read configuration passed by the image orchestrator rather than embedding
+# environment-specific values, product keys, or project credentials in the image.
 function Get-MetadataValue([string]$Key, [string]$DefaultValue) {
     try {
         $headers = @{ 'Metadata-Flavor' = 'Google' }
@@ -33,6 +35,8 @@ function Invoke-Installer([string]$Path, [string]$Arguments, [int[]]$SuccessCode
     }
 }
 
+# The temporary builder uses its attached service account to retrieve approved
+# media and Secret Manager values; these helpers keep tokens out of metadata.
 function Get-GcpAccessToken {
     $headers = @{ 'Metadata-Flavor' = 'Google' }
     $token = Invoke-RestMethod -Headers $headers -Uri 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token'
@@ -75,6 +79,8 @@ try {
         [IO.File]::WriteAllBytes($projectValidatePath, [Convert]::FromBase64String((Get-MetadataValue 'project-validate-b64' '')))
     }
 
+    # Publish the app and health endpoints first; later image checks and the
+    # separate smoke-test VM use these files to prove the captured image works.
     Write-DemoStage 1 9 'Install IIS and publish the versioned web application'
     Install-WindowsFeature Web-Server -IncludeManagementTools | Out-Null
     $appVersion = Get-MetadataValue 'app-version' 'unknown'
@@ -111,6 +117,8 @@ try {
     [Environment]::SetEnvironmentVariable('PATH', $env:PATH + ';C:\Program Files\dotnet', 'Machine')
     Write-DemoPass '.NET 8' 'Installed current .NET 8 channel'
 
+    # Visual Studio installation is selectable: disabled, online workloads, or
+    # a pre-approved offline layout for restricted enterprise environments.
     $vsInstallMode = (Get-MetadataValue 'vs-install-mode' 'web-community').ToLowerInvariant()
     $vsEdition = (Get-MetadataValue 'vs-edition' 'enterprise').ToLowerInvariant()
     $vsInstallRoot = $null
@@ -211,6 +219,8 @@ try {
     $metadataInstallPath = if ($vsInstallRoot) { $vsInstallRoot.Replace('\', '\\') } else { '' }
     Set-Content -Path 'C:\ImageMetadata\visual-studio.json' -Encoding UTF8 -Value "{`"mode`":`"$vsInstallMode`",`"edition`":`"$vsEdition`",`"installPath`":`"$metadataInstallPath`"}"
 
+    # Custom projects supply setup/validation hooks; the sample instead compiles
+    # its checked-in .NET 7 / C# 7 app when a full IDE is installed.
     if ($projectMode -eq 'custom') {
         Write-DemoStage 6 9 'Run the project-provided image setup and validation hooks'
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $projectSetupPath `
@@ -266,12 +276,18 @@ try {
             devenvBuildLog = $devenvLog
             output = $demoOutput
         } | ConvertTo-Json | Set-Content -Path 'C:\ImageMetadata\seven-demo-build.json' -Encoding UTF8
+        # Keep the distributable separate from the image metadata and include
+        # the published runtime files so consumers can run the built demo.
+        Compress-Archive -Path (Join-Path $demoPublish '*') `
+            -DestinationPath 'C:\DemoArtifacts\SevenDemo.zip' -Force
         Write-DemoPass 'SevenDemo' $demoOutput
     }
     elseif ($projectMode -eq 'sample') {
         Write-DemoPass 'SevenDemo' 'Skipped because Visual Studio is disabled'
     }
 
+    # Stage the runner binaries, not a registered runner or registration token;
+    # each later GitHub job supplies fresh registration credentials.
     Write-DemoStage 7 9 'Stage pinned GitHub Actions runner files'
     $runnerVersion = Get-MetadataValue 'runner-version' '2.328.0'
     $runnerRoot = 'C:\actions-runner'
@@ -282,6 +298,8 @@ try {
     Expand-Archive -Path $runnerZip -DestinationPath $runnerRoot -Force
     Write-DemoPass 'GitHub runner' "Staged runner $runnerVersion without registration credentials"
 
+    # Builder checks catch provisioning failures; the independent smoke-test VM
+    # repeats the important checks after image capture and first boot.
     Write-DemoStage 8 9 'Validate IIS, tools, project output and application health'
     if ((Get-WindowsFeature Web-Server).InstallState -ne 'Installed') { throw 'IIS is not installed' }
     $healthPath = Get-MetadataValue 'project-health-path' '/health.html'
@@ -296,6 +314,8 @@ try {
     if ($projectMode -eq 'custom' -and -not (Test-Path 'C:\ImageMetadata\project-validation.txt')) { throw 'Project validation proof is missing' }
     Write-DemoPass 'Image validation' 'All required image checks passed'
 
+    # Remove build-only material and ephemeral access before Sysprep makes the
+    # configured Windows disk safe to reuse as a generalized image.
     Write-DemoStage 9 9 'Clean temporary files and run Sysprep'
     Remove-Item -Path $work -Recurse -Force
     Clear-RecycleBin -Force -ErrorAction SilentlyContinue

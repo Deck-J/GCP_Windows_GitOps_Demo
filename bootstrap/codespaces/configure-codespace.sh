@@ -30,6 +30,8 @@ if [[ -z "$ACTIVE_ACCOUNT" ]]; then
   exit 1
 fi
 
+# Validate project access before changing the active gcloud configuration so
+# subsequent commands do not silently target an inaccessible or unintended project.
 if ! gcloud projects describe "$PROJECT_ID" --format='value(projectId)' >/dev/null 2>&1; then
   log "[FAIL] $ACTIVE_ACCOUNT cannot access GCP project $PROJECT_ID"
   exit 1
@@ -40,6 +42,7 @@ if gcloud config configurations describe "$CONFIGURATION" >/dev/null 2>&1; then
 else
   gcloud config configurations create "$CONFIGURATION" --activate >/dev/null
 fi
+# Use a named configuration to isolate this demo's project/zone from other work.
 gcloud config set project "$PROJECT_ID" >/dev/null
 gcloud config set compute/zone "$ZONE" >/dev/null
 
@@ -54,6 +57,8 @@ REQUIRED_APIS=(
   sts.googleapis.com
 )
 
+# API discovery is informational: this bootstrap reports administrator actions
+# but deliberately does not enable services or alter project policy.
 # Compare the project-wide API list once, then print only the services this demo needs
 # but cannot use yet. Enabling services is left to an administrator, not this check.
 mapfile -t ENABLED_APIS < <(

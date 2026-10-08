@@ -13,6 +13,8 @@ VS_EDITION="$(printf '%s' "$VS_EDITION" | tr '[:upper:]' '[:lower:]')"
 [[ "$VS_EDITION" =~ ^(community|professional|enterprise)$ ]] || { echo "Edition must be community, professional, or enterprise"; exit 1; }
 BUILDER_SA="${BUILDER_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
+# Enable only services used to read the offline media, create the builder VM,
+# and retrieve an edition-specific key during image creation.
 gcloud services enable compute.googleapis.com cloudbuild.googleapis.com secretmanager.googleapis.com storage.googleapis.com \
   --project="$PROJECT_ID"
 
@@ -32,6 +34,7 @@ gcloud storage buckets add-iam-policy-binding "gs://$BUCKET_NAME" \
   --member="serviceAccount:$BUILDER_SA" --role=roles/storage.objectViewer
 
 if [[ "$VS_EDITION" != "community" ]]; then
+  # Commercial editions require a key at installation time; Community does not.
   if ! gcloud secrets describe "$SECRET_NAME" --project="$PROJECT_ID" >/dev/null 2>&1; then
     gcloud secrets create "$SECRET_NAME" --project="$PROJECT_ID" --replication-policy=automatic
   fi

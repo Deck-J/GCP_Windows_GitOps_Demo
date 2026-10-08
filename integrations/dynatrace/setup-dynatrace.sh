@@ -19,6 +19,8 @@ CLOUD_BUILD_SA="${5:?Cloud Build service account email is required}"
 
 RUNTIME_SA="$RUNTIME_SA_NAME@$PROJECT_ID.iam.gserviceaccount.com"
 
+# Refuse non-interactive input so the token is never supplied as a command-line
+# argument or echoed into automation logs.
 if [[ ! -t 0 ]]; then
   echo "Run this setup interactively so the Dynatrace token can be entered without shell history"
   exit 1
@@ -40,6 +42,8 @@ fi
 
 # The installer token is written via stdin; then the local shell variable is
 # cleared before IAM bindings and human-readable setup output are produced.
+# Create resources idempotently so rerunning setup only rotates the secret value
+# and reapplies the narrowly scoped runtime access bindings.
 if ! gcloud secrets describe "$TOKEN_SECRET" --project="$PROJECT_ID" >/dev/null 2>&1; then
   gcloud secrets create "$TOKEN_SECRET" --project="$PROJECT_ID" --replication-policy=automatic
 fi

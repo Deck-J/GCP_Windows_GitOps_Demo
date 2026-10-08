@@ -1,5 +1,7 @@
 # Project hook for custom image builds.
 # Replace this file with project-specific installation and configuration steps.
+# Inputs describe the staged source, destination install location, and exact build revision.
+# Emit PROJECT_SETUP_PASS only after required setup is complete; fail with a nonzero exit code otherwise.
 param(
     [Parameter(Mandatory = $true)][string]$BuildRoot,
     [Parameter(Mandatory = $true)][string]$InstallRoot,

@@ -19,6 +19,8 @@ function Get-MetadataValue([string]$Key, [string]$DefaultValue = '') {
 }
 
 try {
+    # Restrict SSH to the one ephemeral build identity and public key supplied
+    # by the orchestrator; no password or reusable key is configured.
     $userName = Get-MetadataValue 'ephemeral-ssh-user' 'gcebuilder'
     $publicKey = Get-MetadataValue 'ephemeral-ssh-public-key' ''
     if ($userName -notmatch '^[a-zA-Z][a-zA-Z0-9._-]{0,31}$') { throw 'Ephemeral SSH user name is invalid' }
@@ -34,6 +36,8 @@ try {
     }
     Add-LocalGroupMember -Group 'Administrators' -Member $userName -ErrorAction SilentlyContinue
 
+    # OpenSSH on Windows uses a dedicated authorized-key file and explicit ACLs
+    # so only local administrators and SYSTEM can alter the build credential.
     $authorizedKeysPath = Join-Path $env:ProgramData 'ssh\recurring_authorized_keys'
     Set-Content -Path $authorizedKeysPath -Value $publicKey -Encoding ASCII -Force
     icacls.exe $authorizedKeysPath /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
@@ -48,6 +52,8 @@ try {
     )
     Set-Content -Path $configPath -Value $configLines -Encoding ASCII -Force
 
+    # The VM is disposable; the orchestrator removes the temporary tunnel rule,
+    # local account, key file, and VM during its exit cleanup.
     Set-Service -Name sshd -StartupType Automatic
     Start-Service sshd
     Write-Output 'SSH_BOOTSTRAP_READY'

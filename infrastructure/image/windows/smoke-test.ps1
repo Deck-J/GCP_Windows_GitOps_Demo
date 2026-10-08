@@ -24,6 +24,8 @@ try {
     # Run these checks on a fresh VM booted from the captured image, not on the
     # builder. This catches Sysprep/startup regressions before an image is published.
     $projectMode = (Get-MetadataValue 'project-mode' 'sample').ToLowerInvariant()
+    # Verify image contents first so missing components are reported together
+    # before invoking tools or making an HTTP request.
     Write-DemoStage 1 4 'Verify required files and installed Windows features'
     $checks = [ordered]@{
         IIS          = ((Get-WindowsFeature Web-Server).InstallState -eq 'Installed')
@@ -45,6 +47,8 @@ try {
         Write-DemoPass "Smoke $($check.Key)" 'Present'
     }
 
+    # Launch the installed tools and, where configured, check the compiled
+    # artifact rather than merely trusting files left by the image builder.
     Write-DemoStage 2 4 'Execute Git, .NET and Visual Studio toolchain checks'
     & 'C:\Program Files\Git\cmd\git.exe' --version
     & 'C:\Program Files\dotnet\dotnet.exe' --info
@@ -73,6 +77,19 @@ try {
             }
             Write-DemoPass 'SevenDemo execution' $demoOutput
         }
+    }
+    if ($projectMode -eq 'sample' -and (Test-Path 'C:\ImageMetadata\seven-demo-build.json')) {
+        $packageZip = 'C:\DemoArtifacts\SevenDemo.zip'
+        if (-not (Test-Path $packageZip) -or (Get-Item $packageZip).Length -eq 0) {
+            throw 'SevenDemo distribution ZIP is missing or empty'
+        }
+        $packageContents = 'C:\ImageBuild\SevenDemoPackage'
+        Expand-Archive -Path $packageZip -DestinationPath $packageContents -Force
+        if (-not (Test-Path (Join-Path $packageContents 'SevenDemo.dll'))) {
+            throw 'SevenDemo distribution ZIP does not contain SevenDemo.dll'
+        }
+        Remove-Item -Path $packageContents -Recurse -Force
+        Write-DemoPass 'SevenDemo package' 'ZIP contains the published executable and runtime files'
     }
     Write-DemoStage 4 4 'Request application health endpoint'
     $healthPath = Get-MetadataValue 'project-health-path' '/health.html'

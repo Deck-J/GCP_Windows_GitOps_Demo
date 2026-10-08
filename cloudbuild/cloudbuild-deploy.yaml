@@ -1,9 +1,12 @@
-# Cloud Build entry point for the temporary blue/green application demonstration.
-# run-demo.sh validates the desired image, publishes traffic, waits, and always attempts teardown.
+# Deployment entry point submitted by the Dev or Prod GitHub Actions workflow.
+# The wrapper validates the selected manifest, exposes the deployment for a
+# viewing window, and attempts worker teardown while preserving failures.
+# Keep this timeout longer than the maximum viewing window plus deployment/cleanup time.
 timeout: 3600s
 
 steps:
   - id: run-validate-and-teardown-demo
+    # Cloud SDK supplies gcloud; the repository script owns the deployment lifecycle.
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: bash
     args:
@@ -20,7 +23,11 @@ steps:
       - ${_DYNATRACE_HOST_GROUP}
       - ${_DYNATRACE_NETWORK_ZONE}
       - ${_DEPLOYMENT_MANIFEST}
+      # Optional persistent station flag; false leaves no management VM or RDP rules.
+      - ${_MANAGEMENT_STATION_ENABLED}
 
+# Defaults support manual gcloud submission; GitHub Actions overrides the
+# environment-specific values and forwards repository variables explicitly.
 substitutions:
   _ZONE: us-central1-a
   _APP_NAME: prod-iis-demo
@@ -33,6 +40,8 @@ substitutions:
   _DYNATRACE_MONITORING_MODE: "fullstack"
   _DYNATRACE_HOST_GROUP: "gcp-windows-demo"
   _DYNATRACE_NETWORK_ZONE: "disabled"
+  _MANAGEMENT_STATION_ENABLED: "false"
 
 options:
+  # All detailed build output is retained in Cloud Logging.
   logging: CLOUD_LOGGING_ONLY

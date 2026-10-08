@@ -1,17 +1,21 @@
 name: Validate repository
 run-name: Validate repository (${{ github.ref_name }})
 
+# Run fast repository checks before a pull request can merge to main.
+# Manual validation is useful for checking a branch without GCP access.
 on:
   pull_request:
     branches:
       - main
   workflow_dispatch:
 
+# This job is local validation only and needs no cloud credentials.
 permissions:
   contents: read
 
 jobs:
   validate:
+    # Manual dispatch is limited to main; pull_request uses GitHub's PR context.
     if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:

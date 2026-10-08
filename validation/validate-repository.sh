@@ -7,6 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 mapfile -t BASH_FILES < <(find bootstrap infrastructure validation integrations .devcontainer -type f -name '*.sh' -print | sort)
+# Parse every checked-in shell script without executing cloud or destructive commands.
 for file in "${BASH_FILES[@]}"; do
   bash -n "$file"
 done
@@ -27,6 +28,7 @@ done
 echo '[PASS] Dev and Prod worker counts'
 
 if command -v pwsh >/dev/null 2>&1; then
+  # PowerShell's parser provides syntax diagnostics without running the scripts.
   pwsh -NoLogo -NoProfile -File - <<'POWERSHELL'
 $failed = $false
 Get-ChildItem -Path bootstrap, infrastructure, integrations, applications -Filter *.ps1 -Recurse | ForEach-Object {
@@ -46,6 +48,7 @@ else
 fi
 
 if command -v yamllint >/dev/null 2>&1; then
+  # Relax cosmetic rules while still catching malformed Cloud Build YAML.
   yamllint -d '{extends: relaxed, rules: {line-length: disable, truthy: disable}}' \
     cloudbuild/*.yaml
   echo '[PASS] YAML validation'
@@ -54,6 +57,7 @@ else
 fi
 
 if [[ "$MODE" != "--syntax-only" ]]; then
+  # Full mode adds static shell analysis; syntax-only is used during bootstrap.
   if command -v shellcheck >/dev/null 2>&1; then
     shellcheck -x "${BASH_FILES[@]}"
     echo '[PASS] ShellCheck'

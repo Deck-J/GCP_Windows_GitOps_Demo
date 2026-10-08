@@ -1,6 +1,8 @@
 name: Deploy production
 run-name: Deploy production (${{ github.sha }})
 
+# Production runs only after production desired state or shared deployment code
+# changes on main; manual reconciliation is available to authorized operators.
 on:
   push:
     branches:
@@ -13,12 +15,14 @@ on:
       - cloudbuild/cloudbuild-deploy.yaml
   workflow_dispatch:
 
+# OIDC permission is used only to obtain short-lived Google credentials.
 permissions:
   contents: read
   id-token: write
 
 jobs:
   deploy:
+    # Require main for automatic and manual runs, matching the WIF trust condition.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -35,6 +39,7 @@ jobs:
         uses: google-github-actions/setup-gcloud@v2
 
       - name: Submit production deployment to Cloud Build
+        # Production uses its own manifest and management-station flag.
         env:
           GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
           GCP_BUILD_SOURCE_BUCKET: ${{ vars.GCP_BUILD_SOURCE_BUCKET }}
@@ -48,7 +53,10 @@ jobs:
           DYNATRACE_MONITORING_MODE: ${{ vars.DYNATRACE_MONITORING_MODE || 'fullstack' }}
           DYNATRACE_HOST_GROUP: ${{ vars.DYNATRACE_HOST_GROUP || 'gcp-windows-demo' }}
           DYNATRACE_NETWORK_ZONE: ${{ vars.DYNATRACE_NETWORK_ZONE || 'disabled' }}
+          MANAGEMENT_STATION_ENABLED: ${{ vars.PROD_MANAGEMENT_STATION_ENABLED || 'false' }}
         run: |
+          # Wait for Cloud Build's final result so the GitHub check reflects
+          # whether reconciliation and worker cleanup both succeeded.
           set -euo pipefail
           : "${GCP_PROJECT_ID:?Set the GCP_PROJECT_ID repository variable}"
           : "${GCP_BUILD_SOURCE_BUCKET:?Set the GCP_BUILD_SOURCE_BUCKET repository variable}"
@@ -61,9 +69,10 @@ jobs:
             --gcs-source-staging-dir="gs://${GCP_BUILD_SOURCE_BUCKET}/source" \
             --service-account="projects/${GCP_PROJECT_ID}/serviceAccounts/${CLOUD_BUILD_SERVICE_ACCOUNT}" \
             --config=cloudbuild/cloudbuild-deploy.yaml \
-            --substitutions="_ZONE=${GCP_ZONE},_APP_NAME=prod-iis-demo,_DEPLOYMENT_MANIFEST=environments/prod/deployment.env,_TEARDOWN_DELAY_SECONDS=${TEARDOWN_DELAY_SECONDS},_DYNATRACE_ENABLED=${DYNATRACE_ENABLED},_DYNATRACE_ENVIRONMENT_URL=${DYNATRACE_ENVIRONMENT_URL},_DYNATRACE_TOKEN_SECRET=${DYNATRACE_TOKEN_SECRET},_DYNATRACE_RUNTIME_SERVICE_ACCOUNT=${DYNATRACE_RUNTIME_SERVICE_ACCOUNT},_DYNATRACE_MONITORING_MODE=${DYNATRACE_MONITORING_MODE},_DYNATRACE_HOST_GROUP=${DYNATRACE_HOST_GROUP},_DYNATRACE_NETWORK_ZONE=${DYNATRACE_NETWORK_ZONE}"
+            --substitutions="_ZONE=${GCP_ZONE},_APP_NAME=prod-iis-demo,_DEPLOYMENT_MANIFEST=environments/prod/deployment.env,_TEARDOWN_DELAY_SECONDS=${TEARDOWN_DELAY_SECONDS},_DYNATRACE_ENABLED=${DYNATRACE_ENABLED},_DYNATRACE_ENVIRONMENT_URL=${DYNATRACE_ENVIRONMENT_URL},_DYNATRACE_TOKEN_SECRET=${DYNATRACE_TOKEN_SECRET},_DYNATRACE_RUNTIME_SERVICE_ACCOUNT=${DYNATRACE_RUNTIME_SERVICE_ACCOUNT},_DYNATRACE_MONITORING_MODE=${DYNATRACE_MONITORING_MODE},_DYNATRACE_HOST_GROUP=${DYNATRACE_HOST_GROUP},_DYNATRACE_NETWORK_ZONE=${DYNATRACE_NETWORK_ZONE},_MANAGEMENT_STATION_ENABLED=${MANAGEMENT_STATION_ENABLED}"
 
       - name: Report GitHub Actions conclusion
+        # Preserve the final result in the summary even if Cloud Build submission fails.
         if: always()
         env:
           JOB_STATUS: ${{ job.status }}

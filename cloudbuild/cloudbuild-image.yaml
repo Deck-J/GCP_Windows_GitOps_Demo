@@ -1,9 +1,12 @@
-# Cloud Build entry point for the immutable Windows runner image pipeline.
-# The orchestration script creates the builder VM, captures an image, smoke-tests it, and cleans up.
+# Image-build entry point submitted synchronously by GitHub Actions.
+# The orchestration script creates the builder VM, captures an immutable image,
+# boots a separate smoke-test VM, and cleans temporary resources.
+# Allow time for Windows setup, image capture, and post-capture validation.
 timeout: 7200s
 
 steps:
   - id: build-and-test-windows-image
+    # Cloud SDK provides gcloud; bash reads project metadata and starts orchestration.
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: bash
     args:
@@ -27,9 +30,11 @@ steps:
           "${_VS_EDITION}" \
           "${_VS_MEDIA_URI}" \
           "${_VS_PRODUCT_KEY_SECRET}" \
-          "${_BUILDER_SERVICE_ACCOUNT}"
+          "${_BUILDER_SERVICE_ACCOUNT}" \
+          "${_ARTIFACT_GCS_URI}"
 
 substitutions:
+  # These defaults also permit a local/manual gcloud builds submit invocation.
   _ZONE: us-central1-a
   _SOURCE_REVISION: local
   _SOURCE_IMAGE_FAMILY: windows-2022
@@ -42,7 +47,9 @@ substitutions:
   _VS_MEDIA_URI: gs://replace-me/vs2022-community-layout.iso
   _VS_PRODUCT_KEY_SECRET: unused
   _BUILDER_SERVICE_ACCOUNT: unused
+  _ARTIFACT_GCS_URI: disabled
   _KEEP_FAILED_VM: "false"
 
 options:
+  # Retain detailed image-build logs for the GitHub Actions run and operators.
   logging: CLOUD_LOGGING_ONLY

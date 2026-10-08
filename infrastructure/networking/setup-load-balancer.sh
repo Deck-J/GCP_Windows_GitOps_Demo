@@ -18,6 +18,8 @@ LB_TYPE="${LB_TYPE:-HTTP}"
 HEALTH_CHECK_PATH="${HEALTH_CHECK_PATH:-/health.html}"
 PORT="${PORT:-80}"
 
+# Validate manifest-derived values before creating any persistent frontend
+# resources; malformed ports or protocols otherwise fail partway through setup.
 [[ -n "$PROJECT_ID" ]] || { printf '[FAIL] PROJECT_ID is required (argument or environment)\n' >&2; exit 2; }
 [[ "$LB_TYPE" =~ ^(HTTP|TCP)$ ]] || { printf '[FAIL] LB_TYPE must be HTTP or TCP\n' >&2; exit 2; }
 if ! [[ "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
@@ -47,6 +49,8 @@ exists() {
   gcloud "$@" --project="$PROJECT_ID" >/dev/null 2>&1
 }
 
+# Provisioning is idempotent: each named resource is created only if absent,
+# leaving the global frontend intact across repeated environment deployments.
 # Names include the environment's app name so Dev and Prod can keep independent
 # frontends and backends while sharing the repository's provisioning logic.
 printf '[INFO] Provisioning %s load balancer in project %s (zone=%s network=%s subnet=%s)\n' \

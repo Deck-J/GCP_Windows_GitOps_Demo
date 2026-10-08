@@ -17,7 +17,10 @@ DYNATRACE_MONITORING_MODE="${9:-fullstack}"
 DYNATRACE_HOST_GROUP="${10:-gcp-windows-demo}"
 DYNATRACE_NETWORK_ZONE="${11:-disabled}"
 DEPLOYMENT_MANIFEST="${12:-environments/prod/deployment.env}"
+MANAGEMENT_STATION_ENABLED="${13:-false}"
 
+# Emit timestamped progress markers consumed by Cloud Build and the calling
+# GitHub Actions workflow; these markers are separate from process exit status.
 log() {
   printf '[%s] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*"
 }
@@ -36,6 +39,8 @@ countdown() {
 
 # Keep validation status separate from teardown status: a successful cleanup
 # must never hide a failed deployment, and cleanup failure must fail the build.
+# Validate wrapper-level inputs before creating resources or starting the wait
+# window, so an invalid invocation fails quickly and unambiguously.
 if ! [[ "$APP_NAME" =~ ^[a-z]([-a-z0-9]*[a-z0-9])?$ ]] || (( ${#APP_NAME} > 32 )); then
   log "[FAIL] APP_NAME must be a lowercase GCP-safe name of at most 32 characters"
   exit 2
@@ -59,7 +64,8 @@ bash infrastructure/deployment/deploy-blue-green.sh \
   "$DYNATRACE_ENABLED" "$DYNATRACE_ENVIRONMENT_URL" \
   "$DYNATRACE_TOKEN_SECRET" "$DYNATRACE_RUNTIME_SERVICE_ACCOUNT" \
   "$DYNATRACE_MONITORING_MODE" "$DYNATRACE_HOST_GROUP" \
-  "$DYNATRACE_NETWORK_ZONE" "$DEPLOYMENT_MANIFEST"
+  "$DYNATRACE_NETWORK_ZONE" "$DEPLOYMENT_MANIFEST" \
+  "$MANAGEMENT_STATION_ENABLED"
 DEPLOY_STATUS=$?
 set -e
 

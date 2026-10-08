@@ -34,6 +34,8 @@ function Get-GcpProjectId {
 }
 
 function Get-SecretValue([string]$SecretName) {
+    # The runtime VM identity retrieves the latest secret version; only the
+    # secret resource name is passed as instance metadata.
     if ($SecretName -notmatch '^[A-Za-z0-9_-]+$') { throw 'Dynatrace secret name is invalid' }
     $gcpToken = Get-GcpAccessToken
     $projectId = Get-GcpProjectId
@@ -61,6 +63,8 @@ try {
     $appColor = Get-MetadataValue 'app-color' 'unknown'
     $appVersion = Get-MetadataValue 'app-version' 'unknown'
 
+    # Reject invalid or incomplete configuration before downloading an
+    # installer or sending an authenticated request to the Dynatrace tenant.
     if ($environmentUrl -notmatch '^https://[^/]+') { throw 'Dynatrace environment URL must use HTTPS' }
     if ([string]::IsNullOrWhiteSpace($secretName)) { throw 'Dynatrace token secret is required' }
     if ($monitoringMode -notin @('fullstack', 'infra-only', 'discovery')) { throw 'Unsupported Dynatrace monitoring mode' }
@@ -79,6 +83,8 @@ try {
     if ([string]::IsNullOrWhiteSpace($dynatraceToken)) { throw 'Dynatrace installer token is empty' }
     Write-DynatracePass 'Secret Manager' 'Installer token retrieved without exposing its value'
 
+    # Keep the token in memory only for the authenticated download, then clear
+    # both the token and header before validating/executing the installer.
     Write-DynatraceStage 2 5 'Download the latest environment-specific Windows OneAgent installer'
     $downloadUri = "$environmentUrl/api/v1/deployment/installer/agent/windows/default/latest?arch=x86"
     $downloadHeaders = @{ Authorization = "Api-Token $dynatraceToken" }
