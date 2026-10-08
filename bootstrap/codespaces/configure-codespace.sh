@@ -84,11 +84,11 @@ fi
 
 cat <<MESSAGE
 
-Codespace configuration is ready for manual Cloud Build commands.
-Connect the GitHub repository to Cloud Build, then configure triggers with:
+Codespace configuration is ready for manual Cloud Build commands and GitHub Actions setup.
+Configure GitHub Actions Workload Identity Federation with:
   PROJECT_ID=$PROJECT_ID
-  ZONE=$ZONE
-  BUILD_SERVICE_ACCOUNT=<cloud-build-service-account-email>
+  GITHUB_ACTIONS_SERVICE_ACCOUNT=<dedicated-build-submitter-service-account>
+  CLOUD_BUILD_SERVICE_ACCOUNT=<cloud-build-execution-service-account>
 
-Run image and deployment builds with the Cloud Build triggers or gcloud builds submit.
+GitHub Actions submits image and deployment jobs to Cloud Build.
 MESSAGE

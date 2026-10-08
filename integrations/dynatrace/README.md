@@ -27,9 +27,9 @@ From the Codespace, run:
   CLOUD_BUILD_SERVICE_ACCOUNT_EMAIL
 ```
 
-The command securely prompts for the token and prints the substitutions to set
-on both the `reconcile-development-demo` and `reconcile-production-demo` Cloud Build triggers. Keep
-`_DYNATRACE_ENABLED=false` to run the original demo.
+The command securely prompts for the token and prints the GitHub Actions
+repository variables to set for both deployment workflows. Keep
+`DYNATRACE_ENABLED=false` to run the original demo.
 
 ## Deployment behavior
 

@@ -1,0 +1,71 @@
+name: Deploy production
+run-name: Deploy production (${{ github.sha }})
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - environments/prod/deployment.env
+      - infrastructure/deployment/**
+      - infrastructure/networking/**
+      - integrations/dynatrace/**
+      - cloudbuild/cloudbuild-deploy.yaml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Submit production deployment to Cloud Build
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          GCP_BUILD_SOURCE_BUCKET: ${{ vars.GCP_BUILD_SOURCE_BUCKET }}
+          CLOUD_BUILD_SERVICE_ACCOUNT: ${{ vars.CLOUD_BUILD_SERVICE_ACCOUNT }}
+          GCP_ZONE: ${{ vars.GCP_ZONE || 'us-central1-a' }}
+          TEARDOWN_DELAY_SECONDS: ${{ vars.TEARDOWN_DELAY_SECONDS || '600' }}
+          DYNATRACE_ENABLED: ${{ vars.DYNATRACE_ENABLED || 'false' }}
+          DYNATRACE_ENVIRONMENT_URL: ${{ vars.DYNATRACE_ENVIRONMENT_URL || 'disabled' }}
+          DYNATRACE_TOKEN_SECRET: ${{ vars.DYNATRACE_TOKEN_SECRET || 'disabled' }}
+          DYNATRACE_RUNTIME_SERVICE_ACCOUNT: ${{ vars.DYNATRACE_RUNTIME_SERVICE_ACCOUNT || 'disabled' }}
+          DYNATRACE_MONITORING_MODE: ${{ vars.DYNATRACE_MONITORING_MODE || 'fullstack' }}
+          DYNATRACE_HOST_GROUP: ${{ vars.DYNATRACE_HOST_GROUP || 'gcp-windows-demo' }}
+          DYNATRACE_NETWORK_ZONE: ${{ vars.DYNATRACE_NETWORK_ZONE || 'disabled' }}
+        run: |
+          set -euo pipefail
+          : "${GCP_PROJECT_ID:?Set the GCP_PROJECT_ID repository variable}"
+          : "${GCP_BUILD_SOURCE_BUCKET:?Set the GCP_BUILD_SOURCE_BUCKET repository variable}"
+          : "${CLOUD_BUILD_SERVICE_ACCOUNT:?Set the CLOUD_BUILD_SERVICE_ACCOUNT repository variable}"
+          echo "Submitting production deployment to Cloud Build; GitHub Actions will wait for its final status."
+          gcloud builds submit . \
+            --project="$GCP_PROJECT_ID" \
+            --region=global \
+            --polling-interval=10 \
+            --gcs-source-staging-dir="gs://${GCP_BUILD_SOURCE_BUCKET}/source" \
+            --service-account="projects/${GCP_PROJECT_ID}/serviceAccounts/${CLOUD_BUILD_SERVICE_ACCOUNT}" \
+            --config=cloudbuild/cloudbuild-deploy.yaml \
+            --substitutions="_ZONE=${GCP_ZONE},_APP_NAME=prod-iis-demo,_DEPLOYMENT_MANIFEST=environments/prod/deployment.env,_TEARDOWN_DELAY_SECONDS=${TEARDOWN_DELAY_SECONDS},_DYNATRACE_ENABLED=${DYNATRACE_ENABLED},_DYNATRACE_ENVIRONMENT_URL=${DYNATRACE_ENVIRONMENT_URL},_DYNATRACE_TOKEN_SECRET=${DYNATRACE_TOKEN_SECRET},_DYNATRACE_RUNTIME_SERVICE_ACCOUNT=${DYNATRACE_RUNTIME_SERVICE_ACCOUNT},_DYNATRACE_MONITORING_MODE=${DYNATRACE_MONITORING_MODE},_DYNATRACE_HOST_GROUP=${DYNATRACE_HOST_GROUP},_DYNATRACE_NETWORK_ZONE=${DYNATRACE_NETWORK_ZONE}"
+
+      - name: Report GitHub Actions conclusion
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          echo "GitHub Actions result: ${JOB_STATUS}" >> "$GITHUB_STEP_SUMMARY"

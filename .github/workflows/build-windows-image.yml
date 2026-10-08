@@ -1,0 +1,70 @@
+name: Build Windows image
+run-name: Build Windows image (${{ github.sha }})
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - applications/sample/**
+      - infrastructure/image/**
+      - cloudbuild/cloudbuild-image.yaml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_WIF_SERVICE_ACCOUNT }}
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Submit image build to Cloud Build
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          GCP_BUILD_SOURCE_BUCKET: ${{ vars.GCP_BUILD_SOURCE_BUCKET }}
+          CLOUD_BUILD_SERVICE_ACCOUNT: ${{ vars.CLOUD_BUILD_SERVICE_ACCOUNT }}
+          GCP_ZONE: ${{ vars.GCP_ZONE || 'us-central1-a' }}
+          SOURCE_IMAGE_FAMILY: ${{ vars.SOURCE_IMAGE_FAMILY || 'windows-2022' }}
+          IMAGE_FAMILY: ${{ vars.IMAGE_FAMILY || 'windows-github-runner' }}
+          RUNNER_VERSION: ${{ vars.RUNNER_VERSION || '2.328.0' }}
+          VS_INSTALL_MODE: ${{ vars.VS_INSTALL_MODE || 'web-community' }}
+          VS_EDITION: ${{ vars.VS_EDITION || 'community' }}
+          VS_MEDIA_URI: ${{ vars.VS_MEDIA_URI || 'gs://replace-me/vs2022-community-layout.iso' }}
+          VS_PRODUCT_KEY_SECRET: ${{ vars.VS_PRODUCT_KEY_SECRET || 'unused' }}
+          BUILDER_SERVICE_ACCOUNT: ${{ vars.BUILDER_SERVICE_ACCOUNT || 'unused' }}
+          KEEP_FAILED_VM: ${{ vars.KEEP_FAILED_VM || 'false' }}
+        run: |
+          set -euo pipefail
+          : "${GCP_PROJECT_ID:?Set the GCP_PROJECT_ID repository variable}"
+          : "${GCP_BUILD_SOURCE_BUCKET:?Set the GCP_BUILD_SOURCE_BUCKET repository variable}"
+          : "${CLOUD_BUILD_SERVICE_ACCOUNT:?Set the CLOUD_BUILD_SERVICE_ACCOUNT repository variable}"
+          echo "Submitting Windows image build to Cloud Build; GitHub Actions will wait for its final status."
+          gcloud builds submit . \
+            --project="$GCP_PROJECT_ID" \
+            --region=global \
+            --polling-interval=10 \
+            --gcs-source-staging-dir="gs://${GCP_BUILD_SOURCE_BUCKET}/source" \
+            --service-account="projects/${GCP_PROJECT_ID}/serviceAccounts/${CLOUD_BUILD_SERVICE_ACCOUNT}" \
+            --config=cloudbuild/cloudbuild-image.yaml \
+            --substitutions="_ZONE=${GCP_ZONE},_SOURCE_IMAGE_FAMILY=${SOURCE_IMAGE_FAMILY},_IMAGE_FAMILY=${IMAGE_FAMILY},_RUNNER_VERSION=${RUNNER_VERSION},_VS_INSTALL_MODE=${VS_INSTALL_MODE},_VS_EDITION=${VS_EDITION},_VS_MEDIA_URI=${VS_MEDIA_URI},_VS_PRODUCT_KEY_SECRET=${VS_PRODUCT_KEY_SECRET},_BUILDER_SERVICE_ACCOUNT=${BUILDER_SERVICE_ACCOUNT},_KEEP_FAILED_VM=${KEEP_FAILED_VM},_SOURCE_REVISION=${GITHUB_SHA}"
+
+      - name: Report GitHub Actions conclusion
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          echo "GitHub Actions result: ${JOB_STATUS}" >> "$GITHUB_STEP_SUMMARY"

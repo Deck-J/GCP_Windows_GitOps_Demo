@@ -61,14 +61,13 @@ gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
 cat <<OUTPUT
 Dynatrace integration configured.
 
-Set these substitutions on both the reconcile-development-demo and
-reconcile-production-demo Cloud Build triggers:
-  _DYNATRACE_ENABLED=true
-  _DYNATRACE_ENVIRONMENT_URL=${DYNATRACE_ENVIRONMENT_URL%/}
-  _DYNATRACE_TOKEN_SECRET=$TOKEN_SECRET
-  _DYNATRACE_RUNTIME_SERVICE_ACCOUNT=$RUNTIME_SA
-  _DYNATRACE_MONITORING_MODE=fullstack
-  _DYNATRACE_HOST_GROUP=gcp-windows-demo
-  _DYNATRACE_NETWORK_ZONE=disabled
+Set these GitHub Actions repository variables for both deployment workflows:
+  DYNATRACE_ENABLED=true
+  DYNATRACE_ENVIRONMENT_URL=${DYNATRACE_ENVIRONMENT_URL%/}
+  DYNATRACE_TOKEN_SECRET=$TOKEN_SECRET
+  DYNATRACE_RUNTIME_SERVICE_ACCOUNT=$RUNTIME_SA
+  DYNATRACE_MONITORING_MODE=fullstack
+  DYNATRACE_HOST_GROUP=gcp-windows-demo
+  DYNATRACE_NETWORK_ZONE=disabled
 The token value was stored only in Secret Manager and was not printed.
 OUTPUT

@@ -12,8 +12,7 @@ steps:
         set -Eeuo pipefail
         VERSION_FILE="$(jq -r '.versionFile // "applications/sample/VERSION"' applications/sample/project.json)"
         APP_VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
-        SOURCE_REVISION="$COMMIT_SHA"
-        [[ -n "$SOURCE_REVISION" ]] || SOURCE_REVISION=local
+        SOURCE_REVISION="${_SOURCE_REVISION}"
         exec infrastructure/image/orchestrate.sh \
           "$PROJECT_ID" \
           "${_ZONE}" \
@@ -32,6 +31,7 @@ steps:
 
 substitutions:
   _ZONE: us-central1-a
+  _SOURCE_REVISION: local
   _SOURCE_IMAGE_FAMILY: windows-2022
   _IMAGE_FAMILY: windows-github-runner
   _RUNNER_VERSION: 2.328.0
