@@ -7,21 +7,28 @@ steps:
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     entrypoint: bash
     args:
-      - framework/image/orchestrate.sh
-      - $PROJECT_ID
-      - ${_ZONE}
-      - ${_SOURCE_IMAGE_FAMILY}
-      - ${_IMAGE_FAMILY}
-      - $BUILD_ID
-      - ${_RUNNER_VERSION}
-      - ${_VS_INSTALL_MODE}
-      - ${_KEEP_FAILED_VM}
-      - ${_APP_VERSION}
-      - ${_SOURCE_REVISION}
-      - ${_VS_EDITION}
-      - ${_VS_MEDIA_URI}
-      - ${_VS_PRODUCT_KEY_SECRET}
-      - ${_BUILDER_SERVICE_ACCOUNT}
+      - -c
+      - |
+        set -Eeuo pipefail
+        VERSION_FILE="$(jq -r '.versionFile // "applications/sample/VERSION"' applications/sample/project.json)"
+        APP_VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
+        SOURCE_REVISION="$COMMIT_SHA"
+        [[ -n "$SOURCE_REVISION" ]] || SOURCE_REVISION=local
+        exec infrastructure/image/orchestrate.sh \
+          "$PROJECT_ID" \
+          "${_ZONE}" \
+          "${_SOURCE_IMAGE_FAMILY}" \
+          "${_IMAGE_FAMILY}" \
+          "$BUILD_ID" \
+          "${_RUNNER_VERSION}" \
+          "${_VS_INSTALL_MODE}" \
+          "${_KEEP_FAILED_VM}" \
+          "$APP_VERSION" \
+          "$SOURCE_REVISION" \
+          "${_VS_EDITION}" \
+          "${_VS_MEDIA_URI}" \
+          "${_VS_PRODUCT_KEY_SECRET}" \
+          "${_BUILDER_SERVICE_ACCOUNT}"
 
 substitutions:
   _ZONE: us-central1-a
@@ -36,8 +43,6 @@ substitutions:
   _VS_PRODUCT_KEY_SECRET: unused
   _BUILDER_SERVICE_ACCOUNT: unused
   _KEEP_FAILED_VM: "false"
-  _APP_VERSION: 1.0.0
-  _SOURCE_REVISION: local
 
 options:
   logging: CLOUD_LOGGING_ONLY

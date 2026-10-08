@@ -5,59 +5,68 @@
 ```mermaid
 sequenceDiagram
     participant Dev as Developer
-    participant GH as GitHub-hosted Linux runner
+    participant ImageTrigger as Image-build Cloud Build trigger
+    participant DevTrigger as Dev Cloud Build trigger
+    participant ProdTrigger as Prod Cloud Build trigger
     participant Git as GitHub
     participant Build as Cloud Build
     participant Win as Temporary Windows VM in GCP
     participant GCE as Compute Engine runtime
     participant DT as Dynatrace
-    participant LB as Load balancer
+    participant DevLB as Dev load balancer
+    participant ProdLB as Prod load balancer
 
     Dev->>Git: Merge app and VERSION change
-    Git->>GH: Trigger GitHub Actions workflow
-    GH->>Build: Authenticate via OIDC and submit image pipeline
+    Git->>ImageTrigger: Application push
+    ImageTrigger->>Build: Run image pipeline
     Build->>Win: Create Windows builder VM
     Win->>Win: Install IIS, .NET, VS, app and smoke-test tools
     Win-->>Build: Windows image passes validation
-    Build-->>Git: Publish immutable image metadata
-    Git->>Git: Open inactive-color promotion PR
-    Dev->>Git: Review and merge desired state
-    Git->>Build: Reconcile production
-    Build->>GCE: Update inactive-color MIG
-    Build->>GCE: Wait for healthy instances
+    Build-->>Dev: Publish immutable image name in build logs
+    Dev->>Git: Review Dev or Prod manifest update
+    alt Dev manifest changed
+        Git->>DevTrigger: Push event
+        DevTrigger->>Build: Deploy 2 IIS workers from environments/dev
+        Build->>GCE: Reconcile Dev color and backend
+        Build->>DevLB: Publish Dev endpoint
+    else Prod manifest changed
+        Git->>ProdTrigger: Push event
+        ProdTrigger->>Build: Deploy 4 IIS workers from environments/prod
+        Build->>GCE: Reconcile Prod color and backend
+        Build->>ProdLB: Publish Prod endpoint
+    end
     opt Dynatrace enabled
         GCE->>DT: Download and connect OneAgent
         Build->>GCE: Wait for DYNATRACE_READY on every VM
     end
-    Build->>LB: Activate new color
-    Build->>LB: Set old color capacity to zero
     Build->>Build: Keep demo available for 10 minutes
-    Build->>LB: Delete demo frontend and backend
-    Build->>GCE: Delete both MIGs, disks and templates
+    Build->>GCE: Delete that environment's temporary workers and disks
 ```
 
-The GitHub-hosted runner is Linux-only and performs orchestration. The actual
-Windows image build, Windows installation steps, and validation run inside a
-temporary Windows VM launched by Cloud Build in GCP.
+Cloud Build is the CI/CD control plane. It runs repository validation on pull
+requests, builds images on matching pushes to `main`, and runs deployment
+builds when reviewed deployment state changes. The Windows image build and
+validation still run inside temporary Windows VMs launched by Cloud Build.
 
 ## State ownership
 
 | State | Authority |
 | --- | --- |
-| Application source and semantic version | `projects/sample/` in Git |
-| Desired blue/green image versions | `environments/prod/deployment.env` |
+| Application source and semantic version | `applications/sample/` in Git |
+| Environment topology and desired images | `environments/dev/` and `environments/prod/` |
 | Built application release | Immutable Compute Engine image |
-| Running instances | Temporary managed instance groups reconciled from Git |
-| Traffic selection | Backend capacity derived from `ACTIVE_COLOR` during the demo |
+| Running instances | Dev: 2; Prod: 4 temporary IIS workers, reconciled from Git |
+| Traffic selection | Environment backend group selected by `ACTIVE_COLOR` |
 | Rollback | Git revert of the promotion commit |
-| Demo lifetime | Automatic teardown 10 minutes after success or failure |
-| Dynatrace enablement | GitHub variables and Secret Manager reference |
+| Demo lifetime | Each environment is torn down 10 minutes after its deployment |
+| Dynatrace enablement | Cloud Build trigger substitutions and Secret Manager reference |
 | Dynatrace token value | GCP Secret Manager only |
-| OneAgent identity | Created independently at runtime on each MIG VM |
+| OneAgent identity | Created independently at runtime on each worker VM |
 
-The image-build workflow never changes production directly. The deployment
-workflow never invents a version; it reconciles the reviewed manifest. This
-separation supplies the minimum useful GitOps approval boundary. For this
-cost-controlled demonstration, runtime state is intentionally ephemeral: the
-manifest and image remain, while both MIGs and the load-balancer resources are
-removed after the viewing window.
+The image-build trigger never changes either environment directly. Separate
+deployment triggers never invent a version; each reconciles its reviewed
+manifest and has a dedicated backend service, health check, address, and
+frontend. This separation supplies the minimum useful GitOps approval boundary. For this
+cost-controlled demonstration, worker VMs are intentionally ephemeral: each
+environment's manifest, image, and load-balancer resources remain, while its
+workers are removed after the viewing window.

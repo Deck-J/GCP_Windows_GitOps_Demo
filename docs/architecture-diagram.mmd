@@ -3,13 +3,13 @@ flowchart TD
   classDef windows fill:#eafaf1,stroke:#216e3a,stroke-width:2px,color:#111;
   classDef gcp fill:#fff5e6,stroke:#b05a00,stroke-width:2px,color:#111;
 
-  subgraph GH["GitHub-hosted runner: Linux orchestration only"]
+  subgraph GH["Cloud Build triggers"]
     direction TB
-    A["Code change on main"]:::linux --> B["GitHub Actions on ubuntu-latest\nOIDC auth to GCP"]:::linux
-    B --> C["Submit Cloud Build pipeline"]:::linux
+    A["Pull request"]:::linux --> B["Run repository validation"]:::gcp
+    C["Application push to main"]:::linux --> D0["Build Windows image"]:::gcp
   end
 
-  C --> D["Cloud Build creates Windows builder VM in GCP"]:::gcp
+  D0 --> D["Cloud Build creates Windows builder VM in GCP"]:::gcp
   D --> P0["Startup script enables OpenSSH and authorizes temp key"]:::windows
 
   subgraph WIN["Windows builder VM: runs the image build and smoke tests"]
@@ -47,19 +47,20 @@ flowchart TD
     S4 --> S5["SMOKE_TEST_PASS"]:::windows
   end
 
-  S5 --> T["Publish image metadata\nremove temporary build resources"]:::gcp
-  T --> U["Open promotion PR"]:::linux
-  U --> V["Merge reviewed production manifest"]:::linux
-  V --> W["Read ACTIVE_COLOR and target image\nfrom deployment.env"]:::linux
-  W --> X["Reconcile firewall, health check\nand backend service"]:::gcp
-  X --> Y["Create immutable template\nand reconcile target MIG"]:::gcp
-  Y --> Z["Wait for stable instances\nand IIS health"]:::gcp
-  Z --> DX{"Dynatrace enabled?"}:::gcp
-  DX -- "No" --> H["Set target backend capacity to 1"]:::gcp
+  S5 --> T["Publish immutable image name\nremove temporary build resources"]:::gcp
+  T --> U["Review and update the selected\nenvironment deployment manifest"]:::linux
+  U --> V["Push reviewed manifest to main"]:::linux
+  V --> DEVTRIGGER["Dev trigger reads\nenvironments/dev/deployment.env"]:::gcp
+  V --> PRODTRIGGER["Prod trigger reads\nenvironments/prod/deployment.env"]:::gcp
+  DEVTRIGGER --> DEV["Create 2 Dev IIS workers\nwith Dev backend and address"]:::windows
+  PRODTRIGGER --> PROD["Create 4 Prod IIS workers\nwith Prod backend and address"]:::windows
+  DEV --> DX{"Dynatrace enabled?"}:::gcp
+  PROD --> DX
+  DX -- "No" --> H["Verify all environment workers\nand route the selected color"]:::gcp
   DX -- "Yes" --> DY["Install OneAgent on runtime VMs"]:::gcp
   DY --> H
-  H --> I["Publish HTTP load-balancer endpoint"]:::gcp
+  H --> I["Publish the environment-specific\nHTTP load-balancer endpoint"]:::gcp
   I --> J["10-minute viewing and validation window"]:::gcp
-  J --> K["Teardown both MIGs, disks, templates\nand load balancer"]:::gcp
+  J --> K["Tear down that environment's workers\nand disks; keep its load balancer"]:::gcp
 
-  NOTE["Important: the Linux runner is only the GitHub Actions control plane.\nThe actual Windows image build, installation, and smoke tests\nruns inside the temporary Windows VM created by Cloud Build."]:::linux
+  NOTE["Cloud Build is the CI/CD control plane.\nThe Windows image build and smoke tests run\ninside temporary Windows VMs created by Cloud Build."]:::gcp

@@ -1,15 +1,15 @@
 # GCP Windows image and GitOps blue/green pipeline
 
 This repository builds a Windows Server 2022 Compute Engine image without
-Packer. The GitHub Actions workflow runs on a GitHub-hosted Linux runner and
-orchestrates the build via OIDC authentication to Google Cloud. It does not
-compile or install Windows software on the GitHub runner itself. Instead,
-Cloud Build creates a temporary Windows VM in GCP, uses a minimal PowerShell
+Packer. Cloud Build is the CI/CD control plane: repository triggers validate
+pull requests, build images from matching pushes to `main`, and reconcile
+reviewed deployment state. Cloud Build creates a temporary Windows VM in GCP,
+uses a minimal PowerShell
 metadata startup script to bootstrap OpenSSH, then provisions and smoke-tests
 it over an ephemeral Ed25519 SSH key through IAP. It creates a versioned image
 and cleans up temporary resources. It also contains a versioned IIS demo
-application and a GitOps blue/green deployment workflow for two managed
-instance groups.
+application and two separately triggered GitOps blue/green environments:
+Development with two IIS worker nodes and Production with four.
 
 ## Architecture
 
@@ -19,13 +19,13 @@ flowchart TD
   classDef windows fill:#eafaf1,stroke:#216e3a,stroke-width:2px,color:#111;
   classDef gcp fill:#fff5e6,stroke:#b05a00,stroke-width:2px,color:#111;
 
-  subgraph GH["GitHub-hosted runner: Linux orchestration only"]
+  subgraph GH["Cloud Build triggers"]
     direction TB
-    A["Code change on main"]:::linux --> B["GitHub Actions on ubuntu-latest\nOIDC auth to GCP"]:::linux
-    B --> C["Submit Cloud Build pipeline"]:::linux
+    A["Pull request"]:::linux --> B["Run repository validation"]:::gcp
+    C["Application push to main"]:::linux --> D0["Build and smoke-test image"]:::gcp
   end
 
-  C --> D["Cloud Build creates Windows builder VM in GCP"]:::gcp
+  D0 --> D["Cloud Build creates Windows builder VM in GCP"]:::gcp
   D --> P0["Startup script enables OpenSSH and authorizes temp key"]:::windows
 
   subgraph WIN["Windows builder VM: runs the image build and smoke tests"]
@@ -63,57 +63,58 @@ flowchart TD
     S4 --> S5["SMOKE_TEST_PASS"]:::windows
   end
 
-  S5 --> T["Publish image metadata\nremove temporary build resources"]:::gcp
-  T --> U["Open promotion PR"]:::linux
-  U --> V["Merge reviewed production manifest"]:::linux
-  V --> W["Read ACTIVE_COLOR and target image\nfrom deployment.env"]:::linux
-  W --> X["Reconcile firewall, health check\nand backend service"]:::gcp
-  X --> Y["Create immutable template\nand reconcile target MIG"]:::gcp
-  Y --> Z["Wait for stable instances\nand IIS health"]:::gcp
-  Z --> DX{"Dynatrace enabled?"}:::gcp
-  DX -- "No" --> H["Set target backend capacity to 1"]:::gcp
+  S5 --> T["Publish immutable image name\nremove temporary build resources"]:::gcp
+  T --> U["Review and update the target\nDev or Prod deployment manifest"]:::linux
+  U --> DEVTRIGGER
+  U --> PRODTRIGGER
+  DEVTRIGGER --> DEVBUILD["Reconcile environments/dev/deployment.env"]:::gcp
+  PRODTRIGGER --> PRODBUILD["Reconcile environments/prod/deployment.env"]:::gcp
+  DEVBUILD --> DEVNODES["Dev: create 2 IIS worker nodes\nand use Dev load balancer"]:::windows
+  PRODBUILD --> PRODNODES["Prod: create 4 IIS worker nodes\nand use Prod load balancer"]:::windows
+  DEVNODES --> DX{"Dynatrace enabled?"}:::gcp
+  PRODNODES --> DX
+  DX -- "No" --> H["Verify all workers\nand route the selected color"]:::gcp
   DX -- "Yes" --> DY["Install OneAgent on runtime VMs"]:::gcp
   DY --> H
-  H --> I["Publish HTTP load-balancer endpoint"]:::gcp
+  H --> I["Publish the environment-specific\nHTTP load-balancer endpoint"]:::gcp
   I --> J["10-minute viewing and validation window"]:::gcp
-  J --> K["Teardown both MIGs, disks, templates\nand load balancer"]:::gcp
+  J --> K["Tear down that environment's\nworker nodes and disks"]:::gcp
 ```
 
-Important: the Linux runner is only the GitHub Actions control plane. The actual Windows image build, installation, and smoke testing happen inside the temporary Windows Virtual Machine created by Cloud Build in GCP.
+Cloud Build is the CI/CD control plane. The Windows image build, application
+installation, and smoke tests run inside temporary GCP Windows VMs.
 
-Note: the GitHub Actions job itself is Linux. The actual Windows image build,
-Windows application install, and smoke tests run inside temporary GCP Windows
-VMs launched by Cloud Build.
-
-Git is the source of truth. The file `environments/prod/deployment.env` records
-the desired active color plus the immutable image and application version for
-both colors. A deployment is requested by pull request, not by changing GCP
-manually. Reverting the promotion commit requests rollback to the previous
-color.
+Git is the source of truth. `environments/dev/deployment.env` and
+`environments/prod/deployment.env` separately record each environment's worker
+count, active color, and immutable image/application version for both colors.
+Dev provisions two IIS workers; Prod provisions four. Each environment has its
+own Cloud Build trigger, backend service, health check, and public endpoint.
+Reverting that environment's manifest promotion requests rollback to its
+previous color.
 
 ## Repository layout
 
-The repository is organized by responsibility rather than by a single scripts
-directory:
+The repository is organized by responsibility:
 
 ```text
-framework/             Reusable bootstrap, image, deployment, and validation code
-pipelines/             Cloud Build entry points
-The default mode installs the full Visual Studio 2022 Community IDE directly from Microsoft's web installer, so no ISO, media bucket, product key, or builder service account is required. After the one-time trust setup below, validation, image builds, promotion pull requests, deployment, viewing, and teardown all run from GitHub Actions. No local `gcloud` or `gh` command is part of the normal operating flow.
-docs/                  Architecture and operating documentation
-The repository's `Validate repository` workflow runs on every pull request and push to `main`. Use `Build IIS application image` from the Actions tab to start an image build manually, or merge an application change to `main`. The build workflow submits Cloud Build, creates the promotion pull request, and records the result in the Actions summary. Merge that reviewed pull request to trigger `Reconcile production blue-green state`; that workflow deploys, validates, publishes the temporary endpoint, waits ten minutes, and tears everything down.
+bootstrap/              Developer, Cloud Build, and Visual Studio setup
+cloudbuild/             Cloud Build pipeline entry points
+infrastructure/
+  image/                 Windows image build and smoke-test automation
+  deployment/            Blue/green deployment and teardown
+  networking/             Load-balancer and network setup
+applications/sample/     Sample application and Windows setup/validation hooks
+environments/
+  dev/                     Two IIS worker nodes
+  prod/                    Four IIS worker nodes
+integrations/            Optional runtime integrations
+validation/              Repository syntax and lint checks
+docs/                    Architecture and operating documentation
+tools/                   Supporting utilities
+```
 ## Included software
 
-- IIS with a small validation page
-- Git for Windows
-supported development environment with the Google Cloud CLI and GitHub CLI installed. The control plane runs locally while Cloud Build creates the temporary Windows VMs in GCP.
-- .NET 8 SDK for current runner compatibility
-- Visual Studio 2022 Community installed from Microsoft's web installer, or a
   licensed full Visual Studio 2022 edition installed from mounted offline media
-- Pinned GitHub Actions runner binaries (not registered)
-- Versioned static IIS application from `projects/sample/src`
-- Repository-stored `SevenDemo` project targeting .NET 7 and C# 7.0
-- Optional runtime-only Dynatrace OneAgent integration
 
 No GitHub registration token or other reusable secret is placed in the image.
 Register each runner at instance startup with a short-lived token.
@@ -126,76 +127,103 @@ Register each runner at instance startup with a short-lived token.
    managed instance groups, health checks, firewall rules, load-balancer
    resources, disks and images. For an MVP, `roles/compute.instanceAdmin.v1`
    plus the permissions required to create global load-balancer resources is
-   the simplest starting point. Replace this with a custom role for production.
-4. Ensure the project has quota for one `n2-standard-8`, one `e2-standard-4`,
-   Windows licensing and two 200 GB balanced persistent disks.
+  the simplest starting point. It also needs Cloud Logging write access,
+  IAP tunnel access, and `iam.serviceAccountUser` on any builder or runtime
+  service accounts it must attach. Replace broad roles with a custom role for
+  production. The administrator creating triggers needs permission to act as
+  the selected Cloud Build service account.
+4. Ensure quota for one `n2-standard-8` builder, one `e2-standard-4`
+   smoke-test VM, and six `e2-standard-2` IIS workers (four Prod plus two Dev)
+   with 200 GB balanced disks. Blue/green rollouts temporarily overlap old and
+   new workers, so allow for up to twelve runtime VMs during concurrent
+   deployments. Each environment also needs a global load balancer.
 5. Ensure the selected subnet permits outbound HTTPS. The MVP uses ephemeral
    external IP addresses; replace those with a private subnet plus Cloud NAT
    for an enterprise implementation.
 
-## Run it through GitHub Actions
+## Run it through Cloud Build
 
 The default mode installs the full Visual Studio 2022 Community IDE directly
 from Microsoft's web installer, so no ISO, media bucket, product key, or
-builder service account is required. After the one-time trust setup below,
-validation, image builds, promotion pull requests, deployment, viewing, and
-teardown all run from GitHub Actions. No local `gcloud` or `gh` command is part
-of the normal operating flow.
+builder service account is required. Connect this GitHub repository to Cloud
+Build in the Google Cloud Console, then run the trigger bootstrap below.
 
-The `Validate repository` workflow runs on every pull request and push to
-`main`. Use `Build IIS application image` from the Actions tab to start an
-image build manually, or merge an application change to `main`. The build
-workflow submits Cloud Build and creates the promotion pull request. Merge
-that reviewed pull request to trigger `Reconcile production blue-green state`;
-that workflow deploys, validates, publishes the temporary endpoint, waits ten
-minutes, and tears everything down.
+Cloud Build validates pull requests. Merging a matching application change to
+`main` starts the Windows image build. The build logs contain the immutable
+image name. Update the inactive color's image and version plus `ACTIVE_COLOR`
+in the target environment's manifest, then submit that change as a reviewed
+pull request. The Dev and Prod triggers deploy independently, using the
+`NODE_COUNT` in each manifest (2 and 4 respectively). Each demo endpoint is
+available for the configured viewing window, after which that environment's
+worker VMs are removed. The separate load balancer frontends remain ready for
+the next run. Protect `main` and require pull-request validation and human
+approval before allowing deployment-state changes.
 
-### One-time administrator bootstrap
+### One-time trigger setup
 
-An administrator must establish the initial GitHub OIDC trust relationship and
-IAM before GitHub Actions can authenticate. This is the only setup operation
-outside GitHub Actions because a workflow cannot use Workload Identity
-Federation before that trust relationship exists. Run
-`framework/bootstrap/bootstrap-github-actions.sh` once from an administrator
-environment, then do all subsequent work through the Actions tab. The script
-does not create a reusable service-account key.
+Create or select a dedicated Cloud Build service account with the permissions
+listed under Prerequisites. In Cloud Build's Triggers page, connect the GitHub
+repository using the Google Cloud Build GitHub App. From the repository root,
+authenticate `gcloud` to the project and `gh` to the repository, then run:
 
-The bootstrap enables the required APIs, creates the GitHub Actions service
-account and WIF provider, grants Cloud Build submission access, and writes the
-required repository variables. It also sets the default Visual Studio and
-Dynatrace configuration used by the workflows.
+```bash
+  bash ./bootstrap/cloud-build/setup-triggers.sh \
+  PROJECT_ID \
+  us-central1-a \
+  CLOUD_BUILD_SERVICE_ACCOUNT_EMAIL
+```
 
-The required repository variables are `GCP_PROJECT_ID`, `GCP_ZONE`,
-`GCP_WIF_PROVIDER`, and `GCP_SERVICE_ACCOUNT`. GitHub Actions authenticates
-with short-lived OIDC credentials; never add a downloaded service-account JSON
-key to the repository.
+The script creates a pull-request validation trigger, an image-build trigger,
+and separate Dev and Prod deployment triggers. It does not grant broad project
+roles to the build identity. Configure non-default Visual Studio or Dynatrace
+settings in the corresponding trigger's substitutions.
+
+Create the two environment-specific load balancers once:
+
+```bash
+./infrastructure/networking/setup-load-balancer.sh \
+  PROJECT_ID us-central1-a dev-iis-demo environments/dev/deployment.env
+./infrastructure/networking/setup-load-balancer.sh \
+  PROJECT_ID us-central1-a prod-iis-demo environments/prod/deployment.env
+```
+
+The setup is idempotent. It gives Dev and Prod separate health checks, backend
+services, addresses, HTTP frontends, and health-check firewall rules.
+
+To rerun a trigger manually:
+
+```bash
+gcloud builds triggers run build-windows-image --branch=main --project=PROJECT_ID
+gcloud builds triggers run reconcile-development-demo --branch=main --project=PROJECT_ID
+gcloud builds triggers run reconcile-production-demo --branch=main --project=PROJECT_ID
+```
 
 ## Reusing the framework for another project
 
-The repository separates framework-owned infrastructure from project-owned
-Windows installation and validation. The framework owns Cloud Build, temporary
+The repository separates infrastructure automation from application-owned
+Windows installation and validation. The infrastructure code owns Cloud Build, temporary
 VMs, image capture, runner staging, smoke-test markers, blue/green deployment,
 and cleanup. A project supplies its version file plus two PowerShell hooks.
 
-1. Copy this repository and edit `projects/sample/project.json`:
+1. Copy this repository and edit `applications/sample/project.json`:
 
   ```json
   {
     "mode": "custom",
-    "versionFile": "projects/sample/VERSION",
-    "setupScript": "projects/sample/setup.ps1",
-    "validateScript": "projects/sample/validate.ps1",
+    "versionFile": "applications/sample/VERSION",
+    "setupScript": "applications/sample/setup.ps1",
+    "validateScript": "applications/sample/validate.ps1",
     "healthPath": "/health",
     "healthPort": 80
   }
   ```
 
-2. Replace `projects/sample/setup.ps1` with the project installation hook. It receives
+2. Replace `applications/sample/setup.ps1` with the project installation hook. It receives
   `BuildRoot`, `InstallRoot`, `AppVersion`, and `SourceRevision`. Install the
   application and its dependencies there; retrieve sensitive values from
   Secret Manager rather than embedding them in the script.
 
-3. Replace `projects/sample/validate.ps1` with the project image proof. It receives
+3. Replace `applications/sample/validate.ps1` with the project image proof. It receives
   `InstallRoot` and `AppVersion` and must return a nonzero exit code when the
   application cannot run. The framework then checks the configured health URL,
   captures the image, and runs the same proof in the smoke-test VM.
@@ -211,14 +239,14 @@ ISO once on a Windows administration machine, upload it to the restricted GCS
 bucket, and then perform the remaining build and deployment operations from the
 configured environment.
 
-The application version supplied to Cloud Build must match `projects/sample/VERSION`.
+The application version supplied to Cloud Build must match `applications/sample/VERSION`.
 Application HTML is encoded into temporary VM metadata and installed into IIS;
 the resulting image is named deterministically from the version and Git commit.
 
 ## Visual Studio 2022 installation modes
 
 The default `web-community` mode downloads the Visual Studio 2022 Community
-bootstrapper and installs the components in `projects/sample/config/vs2022.vsconfig`.
+bootstrapper and installs the components in `applications/sample/config/vs2022.vsconfig`.
 It installs the full IDE, including `devenv.exe`, and is the recommended path
 when an ISO is not available. It requires outbound HTTPS from the temporary
 Windows builder VM.
@@ -245,22 +273,22 @@ VS 2022 Community layout ISO
           6. Validate devenv.exe and MSBuild
           ### One-time administrator bootstrap
           8. Sysprep and capture image
-          An administrator must establish the initial GitHub OIDC trust relationship and IAM before GitHub Actions can authenticate. This is the only setup operation outside GitHub Actions because a workflow cannot use Workload Identity Federation before that trust relationship exists. Run `framework/bootstrap/bootstrap-github-actions.sh` once from an administrator environment, then do all subsequent work through the Actions tab. The script does not create a reusable service-account key.
+          Connect the GitHub repository to Cloud Build using the Google Cloud Build GitHub App, then run `bootstrap/cloud-build/setup-triggers.sh` to create the repository triggers.
 Community Edition does not use a product key, so the default path does not
-          The bootstrap enables the required APIs, creates the GitHub Actions service account and WIF provider, grants Cloud Build submission access, and writes the required repository variables. It also sets the default Visual Studio and Dynatrace configuration used by the workflows.
+          The trigger bootstrap enables the required APIs and configures repository triggers to use the selected Cloud Build service account.
 `--productKey` installation parameter.
-          The required repository variables are `GCP_PROJECT_ID`, `GCP_ZONE`, `GCP_WIF_PROVIDER`, and `GCP_SERVICE_ACCOUNT`. GitHub Actions authenticates with short-lived OIDC credentials; never add a downloaded service-account JSON key to the repository.
+          Cloud Build trigger substitutions control the zone, Visual Studio installation mode, and optional Dynatrace settings. Keep secrets in Secret Manager rather than trigger substitutions.
 For unattended compilation where the IDE is unnecessary, Build Tools is usually
-          ### 3. Run the full Visual Studio build through Actions
+          ### 3. Run the full Visual Studio build through Cloud Build
 
-          Set the Visual Studio repository variables, then start `Build IIS application image` from the GitHub Actions tab. The workflow passes them to Cloud Build through Workload Identity Federation; no local Cloud Build submission is needed.
+          Set the `_VS_*` substitutions on the `build-windows-image` trigger, then merge an application change to `main` or run the trigger manually.
 .\tools\New-VS2022OfflineMedia.ps1 `
   -Edition Community `
   -LayoutPath C:\VS2022Layout `
   -IsoPath C:\VS2022Media\vs2022-community-layout.iso
-          `Reconcile production blue-green state` from the GitHub Actions tab. A successful deployment is reported only after the 10-minute viewing window and teardown complete. If deployment or validation fails, cleanup still runs and the original failure is returned.
+          Run `gcloud builds triggers run reconcile-production-demo --branch=main --project=PROJECT_ID`. A successful deployment is reported only after the 10-minute viewing window and teardown complete.
 
-The script uses `projects/sample/config/vs2022.vsconfig`, verifies the layout, builds an ISO with
+The script uses `applications/sample/config/vs2022.vsconfig`, verifies the layout, builds an ISO with
 `oscdimg.exe`, and prints its SHA-256 hash. A complete layout can exceed 45 GB;
 the included workload-specific configuration is substantially smaller. Keep the
 path short because Microsoft recommends a layout path under 80 characters.
@@ -270,7 +298,7 @@ path short because Microsoft recommends a layout path under 80 characters.
 Run the setup script. Community mode creates no product-key secret:
 
 ```bash
-./framework/bootstrap/setup-vs-demo.sh \
+./bootstrap/visual-studio/setup-demo.sh \
   PROJECT_ID \
   VS_MEDIA_BUCKET \
   CLOUD_BUILD_SERVICE_ACCOUNT_EMAIL \
@@ -291,12 +319,10 @@ that bucket. Cloud Build receives `iam.serviceAccountUser` only on the builder
 identity. Enterprise and Professional setup additionally grants access to their
 specific product-key secret.
 
-### 3. Run the full Visual Studio build through Actions
+### 3. Run the full Visual Studio build through Cloud Build
 
-Set the Visual Studio repository variables, then start `Build IIS application
-image` from the GitHub Actions tab. The workflow passes them to Cloud Build
-through Workload Identity Federation; no local Cloud Build submission is
-needed.
+Set the `_VS_*` substitutions on the `build-windows-image` Cloud Build trigger,
+then merge an application change to `main` or run that trigger manually.
 
 Supported modes:
 
@@ -313,11 +339,11 @@ bootstrapper at its layout root.
 
 Visual Studio records its layout location for future servicing. These images
 are treated as immutable: update the layout and rebuild the image instead of
-modifying an existing runner VM.
+modifying an existing image.
 
 ### Compiled SevenDemo proof
 
-The source under `projects/sample/demo/SevenDemo` is part of the Git repository. Its project
+The source under `applications/sample/demo/SevenDemo` is part of the Git repository. Its project
 file explicitly contains:
 
 ```xml
@@ -338,7 +364,7 @@ requested legacy toolchain, not for a new production application.
 
 Visual Studio Community is free but is not unrestricted for organizational or
 enterprise use. Confirm that this demonstration fits the applicable Community
-license terms; otherwise switch the same workflow to a properly licensed
+license terms; otherwise switch the image build pipeline to a properly licensed
 Professional or Enterprise edition.
 
 On success, the final log lines print `IMAGE_NAME` and `IMAGE_FAMILY`. Consumers
@@ -348,7 +374,7 @@ names provide immutable build versions.
 ## Optional Dynatrace OneAgent integration
 
 Dynatrace is disabled by default. When enabled, OneAgent is installed at runtime
-on the blue and green IIS application VMs only. It is not activated in the
+on every IIS worker in the blue or green application group. It is not activated in the
 golden image, builder VM or smoke-test VM, which prevents clones from inheriting
 the same agent identity.
 
@@ -364,8 +390,9 @@ flowchart TD
 ```
 
 Create an access token in Dynatrace with only the `InstallerDownload` scope.
-Run the setup from an administrator environment, then use the GitHub Actions
-workflows for all image and deployment operations:
+Run the setup from an administrator environment. Set the printed `_DYNATRACE_*`
+substitutions on both the `reconcile-development-demo` and
+`reconcile-production-demo` Cloud Build triggers:
 
 ```bash
 ./integrations/dynatrace/setup-dynatrace.sh \
@@ -379,25 +406,25 @@ workflows for all image and deployment operations:
 The script securely prompts for the token, stores it in Secret Manager, creates
 or reuses a dedicated runtime service account, grants that identity access only
 to the selected secret, and allows Cloud Build to attach the identity. It never
-prints the token or stores it in Git, GitHub variables, the custom image, or VM
-metadata.
+prints the token or stores it in Git, trigger substitutions, the custom image,
+or VM metadata.
 
-Configure the variables printed by the setup script:
+Configure the underscore-prefixed substitutions printed by the setup script:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `DYNATRACE_ENABLED` | `false` | Enables optional OneAgent installation |
-| `DYNATRACE_ENVIRONMENT_URL` | `disabled` | Dynatrace SaaS environment URL |
-| `DYNATRACE_TOKEN_SECRET` | `disabled` | Secret Manager secret name, not its value |
-| `DYNATRACE_RUNTIME_SERVICE_ACCOUNT` | `disabled` | Identity attached to runtime IIS VMs |
-| `DYNATRACE_MONITORING_MODE` | `fullstack` | `fullstack`, `infra-only`, or `discovery` |
-| `DYNATRACE_HOST_GROUP` | `gcp-windows-demo` | Host group shown in Dynatrace |
-| `DYNATRACE_NETWORK_ZONE` | `disabled` | Optional ActiveGate/network zone |
+| `_DYNATRACE_ENABLED` | `false` | Enables optional OneAgent installation |
+| `_DYNATRACE_ENVIRONMENT_URL` | `disabled` | Dynatrace SaaS environment URL |
+| `_DYNATRACE_TOKEN_SECRET` | `disabled` | Secret Manager secret name, not its value |
+| `_DYNATRACE_RUNTIME_SERVICE_ACCOUNT` | `disabled` | Identity attached to runtime IIS VMs |
+| `_DYNATRACE_MONITORING_MODE` | `fullstack` | `fullstack`, `infra-only`, or `discovery` |
+| `_DYNATRACE_HOST_GROUP` | `gcp-windows-demo` | Host group shown in Dynatrace |
+| `_DYNATRACE_NETWORK_ZONE` | `disabled` | Optional ActiveGate/network zone |
 
 The runtime script validates the downloaded executable's Authenticode signer,
 installs OneAgent silently, applies application/color/version/ephemeral
 metadata, restarts IIS, and checks both the OneAgent Windows service and the IIS
-health endpoint. Every VM in the target MIG must emit `DYNATRACE_READY` before
+health endpoint. Every VM in the target worker group must emit `DYNATRACE_READY` before
 traffic can switch. `DYNATRACE_FAILED` fails the promotion and the standard
 failure teardown still runs.
 
@@ -414,78 +441,79 @@ See `integrations/dynatrace/README.md` for the focused module documentation.
   to delete them manually afterward.
 - The deployment build preserves its success or failure result, waits 600
   seconds, and then runs the same idempotent runtime teardown in either case.
-- Teardown removes both demo MIGs and their disks, versioned instance templates,
-  the HTTP load balancer, reserved frontend address, health check, and demo
-  firewall rule. It does not delete the reusable custom image, Visual Studio
-  ISO, source repository, logs, or secrets.
+- Teardown removes that environment's blue/green worker groups and their disks.
+  Its environment-specific HTTP load balancer, reserved frontend address,
+  health check, and firewall rule remain ready for the next run. It
+  does not delete the reusable custom image, Visual Studio ISO, source
+  repository, logs, or secrets.
 
 ## Console output and run summaries
 
-The image and deployment pipelines are formatted for a live demonstration:
+The image and environment deployment pipelines are formatted for a live demonstration:
 
-- GitHub Actions displays numbered job steps and groups the detailed Cloud
-  Build output into collapsible sections.
+- Cloud Build records trigger executions and detailed step output in the
+  Google Cloud console and Cloud Logging.
 - Cloud Build prints UTC timestamps plus numbered `PIPELINE`, `STAGE`, `DEPLOY`,
   `DYNATRACE`, `DEMO`, and `TEARDOWN` messages.
 - OpenSSH is bootstrapped by the Windows startup script; provisioning and smoke
   test output stream through the IAP SSH session. Visual Studio media download,
   mounting, installation, MSBuild compilation, SevenDemo execution, IIS checks,
   smoke tests and Sysprep are individually visible.
-- Successful checks print `[PASS]`; failures print `[FAIL]`, propagate a
-  nonzero status, and create a GitHub Actions error annotation.
+- Successful checks print `[PASS]`; failures print `[FAIL]` and propagate a
+  nonzero build status.
 - The 10-minute demonstration window prints a heartbeat every 60 seconds.
-- Each GitHub workflow writes a Markdown run summary with the image, application
-  version, target color, validation URL, validation result and teardown status.
+- Build logs include the immutable image name, environment-specific validation
+  URL, and teardown status for the corresponding pipeline.
 
-## GitOps blue/green workflow
+## GitOps blue/green pipeline
 
-Configure these GitHub repository variables:
+The deployment manifest is the reviewed source of truth. No CI identity writes
+back to GitHub or creates promotion pull requests.
 
-| Variable | Purpose |
-| --- | --- |
-| `GCP_PROJECT_ID` | Image and deployment project |
-| `GCP_ZONE` | Zone for the blue and green managed instance groups |
-| `GCP_WIF_PROVIDER` | GitHub-to-GCP Workload Identity provider |
-| `GCP_SERVICE_ACCOUNT` | Service account impersonated by GitHub Actions |
-| `DYNATRACE_ENABLED` | Optional OneAgent toggle; defaults to `false` |
-
-The workflows require GitHub Actions permission to create branches and pull
-requests. Protect the `production` GitHub environment if deployment approval is
-required.
-
-1. Change `projects/sample/src/index.html` or `projects/sample/src/health.html` and increment
-  `projects/sample/VERSION`.
+1. Change `applications/sample/src/index.html` or `applications/sample/src/health.html` and increment
+  `applications/sample/VERSION`.
 2. Merge the application change to `main`.
-3. `build-app-image.yml` creates and smoke-tests an immutable Windows image.
-4. The workflow opens a pull request that points the inactive color to the new
-   image and makes it the desired active color.
-5. Review and merge that promotion pull request.
-6. `reconcile-production.yml` updates only that color, waits for the MIG,
-   optional OneAgent readiness, and `/health.html`, and then switches backend
-   capacity to it.
-7. The public demo remains available for 10 minutes after validation.
-8. The deployment build then removes both colors and all runtime networking,
-   whether validation succeeded or failed. The Git manifest and immutable
-   image remain available to rebuild the demonstration.
+3. The `build-windows-image` Cloud Build trigger creates and smoke-tests an
+  immutable Windows image. Copy its image name from the build logs.
+4. Update the inactive color's image and version in
+  `environments/dev/deployment.env`, and set `ACTIVE_COLOR` to that color.
+   Dev has `NODE_COUNT=2`; both IIS workers must pass health checks.
+5. Open and review a pull request containing the Dev manifest change. Merging
+  it starts `reconcile-development-demo`.
+6. After Dev validation, promote the same image by updating the inactive color
+  in `environments/prod/deployment.env`. Prod has `NODE_COUNT=4`.
+7. Review and merge the Prod manifest change to start
+  `reconcile-production-demo`. Each environment has its own load balancer,
+  health check, address and Cloud Build trigger.
+8. Each endpoint remains available for 10 minutes after validation. Teardown
+  removes that environment's workers on success or failure but leaves its
+  load balancer ready for the next run. The manifests and immutable image
+  remain available for subsequent deployments.
 
 The first deployment seeds one color, so it has no preexisting rollback color.
 After the next successful promotion, both blue and green are populated.
 
 ### Manual reconciliation
 
-After putting a valid image in `environments/prod/deployment.env`, start
-`Reconcile production blue-green state` from the GitHub Actions tab. A
-successful deployment is reported only after the 10-minute viewing window and
-teardown complete. If deployment or validation fails, cleanup still runs and
-the original failure is returned.
+Run either trigger after updating its corresponding manifest:
 
-The deployment script creates the MVP HTTP load balancer and prints its public
-IP. Use HTTPS, a managed certificate, a custom VPC and restricted administration
+```bash
+gcloud builds triggers run reconcile-development-demo --branch=main --project=PROJECT_ID
+gcloud builds triggers run reconcile-production-demo --branch=main --project=PROJECT_ID
+```
+
+A successful deployment is reported only after the 10-minute viewing window
+and worker teardown complete. If deployment or validation fails, cleanup still
+runs and the original failure is returned.
+
+The one-time networking setup creates a dedicated MVP HTTP load balancer for
+each environment. Deployment logs print the selected environment's public IP.
+Use HTTPS, a managed certificate, a custom VPC and restricted administration
 paths before exposing a real application.
 
 ## Intentional MVP limits
 
-- Visual Studio workload selection is controlled by `projects/sample/config/vs2022.vsconfig`;
+- Visual Studio workload selection is controlled by `applications/sample/config/vs2022.vsconfig`;
   add components only when a build proves they are needed.
 - Crystal Reports is not installed because its MSI and license source are
   organization-specific. Add it to `bootstrap.ps1` after placing the installer
@@ -496,8 +524,9 @@ paths before exposing a real application.
   structured status to Cloud Logging and add log-based metrics.
 - The public download URLs should be replaced with approved internal artifact
   mirrors and checksums before production use.
-- The demo uses a zonal blue and green MIG and an HTTP frontend. A production
-  design should use regional MIGs across multiple zones and HTTPS.
+- The demo uses zonal blue and green unmanaged worker groups and HTTP
+  frontends. A production design should use regional managed instance groups
+  across multiple zones and HTTPS.
 
 ## Production hardening follow-ups
 

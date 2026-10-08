@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
-# Delete temporary blue/green unmanaged groups and VMs without removing Day-0 load-balancer resources.
+# Delete temporary blue/green unmanaged groups and VMs without removing the environment load balancer.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT" || exit
-
-# shellcheck disable=SC1091
-source environments/prod/deployment.env
 
 PROJECT_ID="${1:?project id is required}"
 ZONE="${2:?zone is required}"
@@ -22,7 +19,7 @@ if ! [[ "$APP_NAME" =~ ^[a-z]([-a-z0-9]*[a-z0-9])?$ ]] || (( ${#APP_NAME} > 32 )
   exit 2
 fi
 
-BACKEND="windows-app-backend"
+BACKEND="${APP_NAME}-backend"
 FAILED=0
 
 exists() {

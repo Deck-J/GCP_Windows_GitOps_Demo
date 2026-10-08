@@ -83,23 +83,10 @@ fi
 cat <<MESSAGE
 
 Codespace configuration is ready for manual Cloud Build commands.
-GitHub Actions additionally requires these repository variables:
-  GCP_PROJECT_ID=$PROJECT_ID
-  GCP_ZONE=$ZONE
-  GCP_WIF_PROVIDER=<workload-identity-provider-resource-name>
-  GCP_SERVICE_ACCOUNT=<github-actions-service-account-email>
-  VS_INSTALL_MODE=web-community
-  VS_EDITION=community
-  VS_MEDIA_URI=gs://unused/vs2022-community-layout.iso
-  VS_PRODUCT_KEY_SECRET=unused
-  BUILDER_SERVICE_ACCOUNT=unused
+Connect the GitHub repository to Cloud Build, then configure triggers with:
+  PROJECT_ID=$PROJECT_ID
+  ZONE=$ZONE
+  BUILD_SERVICE_ACCOUNT=<cloud-build-service-account-email>
 
-Optional Dynatrace repository variables:
-  DYNATRACE_ENABLED=false
-  DYNATRACE_ENVIRONMENT_URL=disabled
-  DYNATRACE_TOKEN_SECRET=disabled
-  DYNATRACE_RUNTIME_SERVICE_ACCOUNT=disabled
-  DYNATRACE_MONITORING_MODE=fullstack
-  DYNATRACE_HOST_GROUP=gcp-windows-demo
-  DYNATRACE_NETWORK_ZONE=disabled
+Run image and deployment builds with the Cloud Build triggers or gcloud builds submit.
 MESSAGE

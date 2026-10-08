@@ -8,15 +8,15 @@ cd "$ROOT"
 PROJECT_ID="${1:?project id is required}"
 ZONE="${2:?zone is required}"
 APP_NAME="${3:?application name is required}"
-MIG_SIZE="${4:-2}"
-TEARDOWN_DELAY_SECONDS="${5:-600}"
-DYNATRACE_ENABLED="${6:-false}"
-DYNATRACE_ENVIRONMENT_URL="${7:-disabled}"
-DYNATRACE_TOKEN_SECRET="${8:-disabled}"
-DYNATRACE_RUNTIME_SERVICE_ACCOUNT="${9:-disabled}"
-DYNATRACE_MONITORING_MODE="${10:-fullstack}"
-DYNATRACE_HOST_GROUP="${11:-gcp-windows-demo}"
-DYNATRACE_NETWORK_ZONE="${12:-disabled}"
+TEARDOWN_DELAY_SECONDS="${4:-600}"
+DYNATRACE_ENABLED="${5:-false}"
+DYNATRACE_ENVIRONMENT_URL="${6:-disabled}"
+DYNATRACE_TOKEN_SECRET="${7:-disabled}"
+DYNATRACE_RUNTIME_SERVICE_ACCOUNT="${8:-disabled}"
+DYNATRACE_MONITORING_MODE="${9:-fullstack}"
+DYNATRACE_HOST_GROUP="${10:-gcp-windows-demo}"
+DYNATRACE_NETWORK_ZONE="${11:-disabled}"
+DEPLOYMENT_MANIFEST="${12:-environments/prod/deployment.env}"
 
 log() {
   printf '[%s] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*"
@@ -43,15 +43,19 @@ if ! [[ "$TEARDOWN_DELAY_SECONDS" =~ ^[0-9]+$ ]]; then
   log "[FAIL] TEARDOWN_DELAY_SECONDS must be a non-negative integer"
   exit 2
 fi
+[[ -f "$DEPLOYMENT_MANIFEST" ]] || {
+  log "[FAIL] Deployment manifest does not exist: $DEPLOYMENT_MANIFEST"
+  exit 2
+}
 
 log "[DEMO 1/5] Start blue/green deployment and application validation"
 set +e
-bash framework/deploy/deploy-blue-green.sh \
-  "$PROJECT_ID" "$ZONE" "$APP_NAME" "$MIG_SIZE" \
+bash infrastructure/deployment/deploy-blue-green.sh \
+  "$PROJECT_ID" "$ZONE" "$APP_NAME" \
   "$DYNATRACE_ENABLED" "$DYNATRACE_ENVIRONMENT_URL" \
   "$DYNATRACE_TOKEN_SECRET" "$DYNATRACE_RUNTIME_SERVICE_ACCOUNT" \
   "$DYNATRACE_MONITORING_MODE" "$DYNATRACE_HOST_GROUP" \
-  "$DYNATRACE_NETWORK_ZONE"
+  "$DYNATRACE_NETWORK_ZONE" "$DEPLOYMENT_MANIFEST"
 DEPLOY_STATUS=$?
 set -e
 
@@ -66,9 +70,9 @@ fi
 log "[DEMO 3/5] Keep the environment available for ${TEARDOWN_DELAY_SECONDS} seconds"
 countdown "$TEARDOWN_DELAY_SECONDS"
 
-log "[DEMO 4/5] Tear down both colors and demo networking"
+log "[DEMO 4/5] Tear down this environment's blue/green worker nodes"
 set +e
-bash framework/deploy/teardown-demo.sh "$PROJECT_ID" "$ZONE" "$APP_NAME"
+bash infrastructure/deployment/teardown-demo.sh "$PROJECT_ID" "$ZONE" "$APP_NAME"
 TEARDOWN_STATUS=$?
 set -e
 

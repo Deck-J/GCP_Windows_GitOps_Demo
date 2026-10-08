@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# Provision the persistent global load-balancer frontend and backend service.
+# Provision the persistent global load-balancer frontend and backend for one environment.
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
-# This file is reviewed in Git before execution and contains assignments only.
-# shellcheck disable=SC1091
-source environments/prod/deployment.env
-
 PROJECT_ID="${1:-${PROJECT_ID:-}}"
 ZONE="${2:-${ZONE:-}}"
+APP_NAME="${3:-prod-iis-demo}"
+MANIFEST="${4:-environments/prod/deployment.env}"
+[[ -f "$MANIFEST" ]] || { printf '[FAIL] Deployment manifest does not exist: %s\n' "$MANIFEST" >&2; exit 2; }
+# This file is reviewed in Git before execution and contains assignments only.
+# shellcheck disable=SC1090
+source "$MANIFEST"
 NETWORK="${NETWORK:-default}"
 SUBNET="${SUBNET:-default}"
 LB_TYPE="${LB_TYPE:-HTTP}"
@@ -27,14 +29,19 @@ if [[ "$LB_TYPE" == "HTTP" && ! "$HEALTH_CHECK_PATH" =~ ^/ ]]; then
   exit 2
 fi
 
-HEALTH_CHECK="windows-app-health"
-BACKEND="windows-app-backend"
-URL_MAP="windows-app-url-map"
-HTTP_PROXY="windows-app-http-proxy"
-TCP_PROXY="windows-app-tcp-proxy"
-ADDRESS="windows-app-ip"
-FORWARDING_RULE="windows-app-forwarding-rule"
-FIREWALL="windows-app-allow-health-check"
+if ! [[ "$APP_NAME" =~ ^[a-z]([-a-z0-9]*[a-z0-9])?$ ]] || (( ${#APP_NAME} > 32 )); then
+  printf '[FAIL] APP_NAME must be a lowercase GCP-safe name of at most 32 characters\n' >&2
+  exit 2
+fi
+
+HEALTH_CHECK="${APP_NAME}-health"
+BACKEND="${APP_NAME}-backend"
+URL_MAP="${APP_NAME}-url-map"
+HTTP_PROXY="${APP_NAME}-http-proxy"
+TCP_PROXY="${APP_NAME}-tcp-proxy"
+ADDRESS="${APP_NAME}-ip"
+FORWARDING_RULE="${APP_NAME}-forwarding-rule"
+FIREWALL="${APP_NAME}-allow-health-check"
 
 exists() {
   gcloud "$@" --project="$PROJECT_ID" >/dev/null 2>&1
@@ -108,4 +115,4 @@ fi
 
 PUBLIC_IP="$(gcloud compute addresses describe "$ADDRESS" \
   --project="$PROJECT_ID" --global --format='value(address)')"
-printf '[PASS] %s load balancer is ready at %s:%s\n' "$LB_TYPE" "$PUBLIC_IP" "$PORT"
+printf '[PASS] %s load balancer %s is ready at %s:%s\n' "$LB_TYPE" "$APP_NAME" "$PUBLIC_IP" "$PORT"

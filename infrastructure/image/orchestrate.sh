@@ -60,8 +60,8 @@ on_error() {
 }
 trap 'on_error "$LINENO"' ERR
 
-PROJECT_MODE="$(jq -r '.mode // "sample"' projects/sample/project.json)"
-PROJECT_VERSION_FILE="$(jq -r '.versionFile // "projects/sample/VERSION"' projects/sample/project.json)"
+PROJECT_MODE="$(jq -r '.mode // "sample"' applications/sample/project.json)"
+PROJECT_VERSION_FILE="$(jq -r '.versionFile // "applications/sample/VERSION"' applications/sample/project.json)"
 REPO_APP_VERSION="$(tr -d '[:space:]' < "$PROJECT_VERSION_FILE")"
 if [[ "$APP_VERSION" != "$REPO_APP_VERSION" ]]; then
   log "[FAIL] APP_VERSION $APP_VERSION does not match the configured version file $PROJECT_VERSION_FILE ($REPO_APP_VERSION)"
@@ -81,8 +81,8 @@ SSH_FIREWALL="${BUILD_VM}-iap-ssh"
 RDP_TAG="${BUILD_VM}-iap-rdp"
 RDP_FIREWALL="${BUILD_VM}-iap-rdp"
 VS_CONFIG_B64=''
-if [[ -f projects/sample/config/vs2022.vsconfig ]]; then
-  VS_CONFIG_B64="$(base64 -w0 projects/sample/config/vs2022.vsconfig)"
+if [[ -f applications/sample/config/vs2022.vsconfig ]]; then
+  VS_CONFIG_B64="$(base64 -w0 applications/sample/config/vs2022.vsconfig)"
 fi
 APP_INDEX_B64=''
 APP_HEALTH_B64=''
@@ -90,16 +90,16 @@ DEMO_PROJECT_B64=''
 DEMO_PROGRAM_B64=''
 DEMO_GLOBAL_JSON_B64=''
 if [[ "$PROJECT_MODE" == "sample" ]]; then
-  APP_INDEX_B64="$(base64 -w0 projects/sample/src/index.html)"
-  APP_HEALTH_B64="$(base64 -w0 projects/sample/src/health.html)"
-  DEMO_PROJECT_B64="$(base64 -w0 projects/sample/demo/SevenDemo/SevenDemo.csproj)"
-  DEMO_PROGRAM_B64="$(base64 -w0 projects/sample/demo/SevenDemo/Program.cs)"
-  DEMO_GLOBAL_JSON_B64="$(base64 -w0 projects/sample/demo/SevenDemo/global.json)"
+  APP_INDEX_B64="$(base64 -w0 applications/sample/src/index.html)"
+  APP_HEALTH_B64="$(base64 -w0 applications/sample/src/health.html)"
+  DEMO_PROJECT_B64="$(base64 -w0 applications/sample/demo/SevenDemo/SevenDemo.csproj)"
+  DEMO_PROGRAM_B64="$(base64 -w0 applications/sample/demo/SevenDemo/Program.cs)"
+  DEMO_GLOBAL_JSON_B64="$(base64 -w0 applications/sample/demo/SevenDemo/global.json)"
 fi
-PROJECT_SETUP_B64="$(base64 -w0 "$(jq -r '.setupScript' projects/sample/project.json)")"
-PROJECT_VALIDATE_B64="$(base64 -w0 "$(jq -r '.validateScript' projects/sample/project.json)")"
-PROJECT_HEALTH_PATH="$(jq -r '.healthPath // "/health.html"' projects/sample/project.json)"
-PROJECT_HEALTH_PORT="$(jq -r '.healthPort // 80' projects/sample/project.json)"
+PROJECT_SETUP_B64="$(base64 -w0 "$(jq -r '.setupScript' applications/sample/project.json)")"
+PROJECT_VALIDATE_B64="$(base64 -w0 "$(jq -r '.validateScript' applications/sample/project.json)")"
+PROJECT_HEALTH_PATH="$(jq -r '.healthPath // "/health.html"' applications/sample/project.json)"
+PROJECT_HEALTH_PORT="$(jq -r '.healthPort // 80' applications/sample/project.json)"
 BUILD_TIMEOUT_SECONDS=6300
 TEST_TIMEOUT_SECONDS=900
 POLL_SECONDS=20
@@ -306,7 +306,7 @@ gcloud compute instances create "$BUILD_VM" \
   --tags="$INSTANCE_TAGS" \
   "${SERVICE_ACCOUNT_ARGS[@]}" \
   --metadata="ephemeral-ssh-user=${SSH_USER},ephemeral-ssh-public-key=${SSH_PUBLIC_KEY},runner-version=${RUNNER_VERSION},vs-install-mode=${VS_INSTALL_MODE},vs-edition=${VS_EDITION},vs-media-uri=${VS_MEDIA_URI},vs-product-key-secret=${VS_PRODUCT_KEY_SECRET},vs-config-b64=${VS_CONFIG_B64},demo-project-b64=${DEMO_PROJECT_B64},demo-program-b64=${DEMO_PROGRAM_B64},demo-global-json-b64=${DEMO_GLOBAL_JSON_B64},project-mode=${PROJECT_MODE},project-setup-b64=${PROJECT_SETUP_B64},project-validate-b64=${PROJECT_VALIDATE_B64},project-health-path=${PROJECT_HEALTH_PATH},project-health-port=${PROJECT_HEALTH_PORT},app-version=${APP_VERSION},source-revision=${SOURCE_REVISION},app-index-b64=${APP_INDEX_B64},app-health-b64=${APP_HEALTH_B64}" \
-  --metadata-from-file=windows-startup-script-ps1=framework/image/windows/ssh-bootstrap.ps1
+  --metadata-from-file=windows-startup-script-ps1=infrastructure/image/windows/ssh-bootstrap.ps1
 MANAGEMENT_VM_CREATED=true
 
 if [[ "$MANAGEMENT_MODE" == "true" ]]; then
@@ -324,7 +324,7 @@ fi
 
 pipeline_stage 3 "Stream Windows provisioning and Visual Studio installation"
 wait_for_marker "$BUILD_VM" "SSH_BOOTSTRAP_READY" "SSH_BOOTSTRAP_FAILED:" "$BUILD_TIMEOUT_SECONDS"
-copy_to_vm "$BUILD_VM" framework/image/windows/bootstrap.ps1 'C:/ImageBuild/bootstrap.ps1'
+copy_to_vm "$BUILD_VM" infrastructure/image/windows/bootstrap.ps1 'C:/ImageBuild/bootstrap.ps1'
 set +e
 ssh_command "$BUILD_VM" 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/ImageBuild/bootstrap.ps1' | tee "$BUILD_VM-ssh.log"
 SSH_STATUS=${PIPESTATUS[0]}
@@ -363,10 +363,10 @@ gcloud compute instances create "$TEST_VM" \
   --no-scopes \
   --tags="$SSH_TAG" \
   --metadata="ephemeral-ssh-user=${SSH_USER},ephemeral-ssh-public-key=${SSH_PUBLIC_KEY}" \
-  --metadata-from-file=windows-startup-script-ps1=framework/image/windows/ssh-bootstrap.ps1
+  --metadata-from-file=windows-startup-script-ps1=infrastructure/image/windows/ssh-bootstrap.ps1
 
 wait_for_marker "$TEST_VM" "SSH_BOOTSTRAP_READY" "SSH_BOOTSTRAP_FAILED:" "$TEST_TIMEOUT_SECONDS"
-copy_to_vm "$TEST_VM" framework/image/windows/smoke-test.ps1 'C:/ImageBuild/smoke-test.ps1'
+copy_to_vm "$TEST_VM" infrastructure/image/windows/smoke-test.ps1 'C:/ImageBuild/smoke-test.ps1'
 set +e
 ssh_command "$TEST_VM" 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:/ImageBuild/smoke-test.ps1' | tee "$TEST_VM-ssh.log"
 SSH_STATUS=${PIPESTATUS[0]}

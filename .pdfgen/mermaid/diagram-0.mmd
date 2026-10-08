@@ -1,57 +1,65 @@
 flowchart TD
-  A["App change and VERSION change on main"] --> B["Cloud Build image pipeline"]
-  B --> C["Validate version, encode project files and hooks"]
-  C --> D["Create temporary Windows builder VM\nfrom windows-2022 source image"]
-  D --> P0
+  classDef linux fill:#eaf2ff,stroke:#2357a6,stroke-width:2px,color:#111;
+  classDef windows fill:#eafaf1,stroke:#216e3a,stroke-width:2px,color:#111;
+  classDef gcp fill:#fff5e6,stroke:#b05a00,stroke-width:2px,color:#111;
 
-  subgraph WIN["Temporary Windows builder VM - ephemeral IAP SSH"]
+  subgraph GH["Cloud Build triggers"]
+    direction TB
+    A["Pull request"]:::linux --> B["Run repository validation"]:::gcp
+    C["Application push to main"]:::linux --> D0["Build and smoke-test image"]:::gcp
+  end
+
+  D0 --> D["Cloud Build creates Windows builder VM in GCP"]:::gcp
+  D --> P0["Startup script enables OpenSSH and authorizes temp key"]:::windows
+
+  subgraph WIN["Windows builder VM: runs the image build and smoke tests"]
     direction TD
-    P0["Startup script enables OpenSSH and authorizes temporary key"]
-    P0 --> P0A["Cloud Build copies bootstrap.ps1 over SSH"]
-    P0A --> P1["PowerShell stage 1/9\nInstall IIS and publish versioned app\nindex.html, health.html, version.json"]
-    P1 --> P2["PowerShell stage 2/9\nDownload and silently install Git for Windows"]
-    P2 --> P3["PowerShell stage 3/9\nInstall pinned .NET 7.0.410 SDK"]
-    P3 --> P4["PowerShell stage 4/9\nInstall .NET 8 SDK and update machine PATH"]
-    P4 --> P5["PowerShell stage 5/9\nInstall Visual Studio 2022"]
-    P5 --> P5A{"Installation mode?"}
-    P5A -- "web-buildtools" --> P5B["Download VS Build Tools\ninstall MSBuild and .NET web workload"]
-    P5A -- "offline-iso" --> P5C["Read ISO from restricted GCS\nmount media and locate edition bootstrapper"]
-    P5C --> P5D["Read product key from Secret Manager\nwhen Enterprise or Professional"]
-    P5D --> P5E["Install from mounted media\nthen dismount ISO"]
-    P5A -- "disabled" --> P5F["Record Visual Studio skipped"]
-    P5B --> P5G["Validate MSBuild and, for full IDE modes, devenv.exe"]
+    P0 --> P0A["Copy bootstrap.ps1 over SSH"]:::windows
+    P0A --> P1["PowerShell stage 1/9\nInstall IIS and publish app"]:::windows
+    P1 --> P2["PowerShell stage 2/9\nInstall Git for Windows"]:::windows
+    P2 --> P3["PowerShell stage 3/9\nInstall pinned .NET 7 SDK"]:::windows
+    P3 --> P4["PowerShell stage 4/9\nInstall .NET 8 SDK"]:::windows
+    P4 --> P5["PowerShell stage 5/9\nInstall Visual Studio 2022"]:::windows
+    P5 --> P5A{"Installation mode?"}:::windows
+    P5A -- "web-buildtools" --> P5B["Install VS Build Tools"]:::windows
+    P5A -- "offline-iso" --> P5C["Install from mounted ISO"]:::windows
+    P5C --> P5D["Read product key from Secret Manager"]:::windows
+    P5D --> P5E["Complete install and dismount ISO"]:::windows
+    P5A -- "disabled" --> P5F["Skip VS install"]:::windows
+    P5B --> P5G["Validate MSBuild and devenv.exe"]:::windows
     P5E --> P5G
     P5F --> P6
-    P5G --> P6["PowerShell stage 6/9\nRun project setup and validation hooks\nor compile and execute SevenDemo"]
-    P6 --> P7["PowerShell stage 7/9\nDownload and stage pinned GitHub Actions runner\nwithout registration credentials"]
-    P7 --> P8["PowerShell stage 8/9\nCheck IIS, Git, .NET, runner, VS metadata,\nproject proof and HTTP health endpoint"]
-    P8 --> P9["PowerShell stage 9/9\nDelete temporary files and run GCE Sysprep"]
+    P5G --> P6["PowerShell stage 6/9\nRun project setup and validation hooks"]:::windows
+    P6 --> P7["PowerShell stage 7/9\nStage pinned GitHub Actions runner binaries"]:::windows
+    P7 --> P8["PowerShell stage 8/9\nVerify installed tools and HTTP health"]:::windows
+    P8 --> P9["PowerShell stage 9/9\nSysprep and shut down VM"]:::windows
   end
 
-  P9 --> Q["IMAGE_BUILD_COMPLETE\nwait for builder VM shutdown"]
-  Q --> R["Capture immutable Compute Engine image"]
-  R --> S
+  P9 --> Q["Capture immutable Windows image"]:::gcp
+  Q --> S["Boot smoke-test VM from captured image"]:::windows
 
-  subgraph SMOKE["Temporary smoke-test VM - ephemeral IAP SSH"]
+  subgraph SMOKE["Smoke-test VM: Windows validation only"]
     direction TD
-    S["Boot from captured image"] --> S1["Smoke stage 1/4\nVerify IIS, app files, tools and image proof"]
-    S1 --> S2["Smoke stage 2/4\nRun Git, dotnet --info and MSBuild checks"]
-    S2 --> S3["Smoke stage 3/4\nExecute compiled SevenDemo when enabled"]
-    S3 --> S4["Smoke stage 4/4\nRequest IIS health endpoint"]
-    S4 --> S5["SMOKE_TEST_PASS\nshutdown smoke-test VM"]
+    S --> S1["Smoke stage 1/4\nVerify IIS, app files and image proof"]:::windows
+    S1 --> S2["Smoke stage 2/4\nRun Git, dotnet and MSBuild checks"]:::windows
+    S2 --> S3["Smoke stage 3/4\nExecute SevenDemo when enabled"]:::windows
+    S3 --> S4["Smoke stage 4/4\nRequest IIS health endpoint"]:::windows
+    S4 --> S5["SMOKE_TEST_PASS"]:::windows
   end
 
-  S5 --> T["Publish IMAGE_NAME and IMAGE_FAMILY\nremove temporary build resources"]
-  T --> U["Open promotion pull request\nwith immutable image and app version"]
-  U --> V["Merge reviewed production manifest"]
-  V --> W["Read ACTIVE_COLOR and target image\nfrom environments/prod/deployment.env"]
-  W --> X["Reconcile firewall, health check\nand backend service"]
-  X --> Y["Create immutable instance template\nand reconcile target MIG"]
-  Y --> Z["Wait for stable instances and IIS health"]
-  Z --> DX{"Dynatrace enabled?"}
-  DX -- "No" --> H["Set target backend capacity to 1\nand inactive backend to 0"]
-  DX -- "Yes" --> DY["Install OneAgent on runtime VMs\nwait for DYNATRACE_READY on every VM"]
+  S5 --> T["Publish immutable image name\nremove temporary build resources"]:::gcp
+  T --> U["Review and update the target\nDev or Prod deployment manifest"]:::linux
+  U --> DEVTRIGGER
+  U --> PRODTRIGGER
+  DEVTRIGGER --> DEVBUILD["Reconcile environments/dev/deployment.env"]:::gcp
+  PRODTRIGGER --> PRODBUILD["Reconcile environments/prod/deployment.env"]:::gcp
+  DEVBUILD --> DEVNODES["Dev: create 2 IIS worker nodes\nand use Dev load balancer"]:::windows
+  PRODBUILD --> PRODNODES["Prod: create 4 IIS worker nodes\nand use Prod load balancer"]:::windows
+  DEVNODES --> DX{"Dynatrace enabled?"}:::gcp
+  PRODNODES --> DX
+  DX -- "No" --> H["Verify all workers\nand route the selected color"]:::gcp
+  DX -- "Yes" --> DY["Install OneAgent on runtime VMs"]:::gcp
   DY --> H
-  H --> I["Publish HTTP load-balancer endpoint"]
-  I --> J["10-minute viewing and validation window"]
-  J --> K["Teardown both MIGs, templates, disks,\nload balancer and demo firewall"]
+  H --> I["Publish the environment-specific\nHTTP load-balancer endpoint"]:::gcp
+  I --> J["10-minute viewing and validation window"]:::gcp
+  J --> K["Tear down that environment's\nworker nodes and disks"]:::gcp

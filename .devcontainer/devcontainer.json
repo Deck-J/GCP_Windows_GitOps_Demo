@@ -26,8 +26,9 @@
         "terminal.integrated.defaultProfile.linux": "bash",
         "yaml.schemas": {
           "https://json.schemastore.org/cloudbuild.json": [
-            "pipelines/cloudbuild-image.yaml",
-            "pipelines/cloudbuild-deploy.yaml"
+            "cloudbuild/cloudbuild-image.yaml",
+            "cloudbuild/cloudbuild-deploy.yaml",
+            "cloudbuild/cloudbuild-validate.yaml"
           ]
         }
       }
