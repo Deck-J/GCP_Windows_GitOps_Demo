@@ -14,7 +14,7 @@ on:
       - packaging/**
   workflow_dispatch:
 
-# Grant only checkout access and the OIDC token needed for keyless GCP auth.
+# Grant checkout, keyless GCP authentication, and package publication permissions.
 permissions:
   contents: read
   id-token: write
@@ -86,6 +86,7 @@ jobs:
           fi
 
       - name: Download validated SevenDemo artifact
+        id: download-sevendemo
         if: steps.sevendemo.outputs.available == 'true'
         env:
           GCP_BUILD_SOURCE_BUCKET: ${{ vars.GCP_BUILD_SOURCE_BUCKET }}
@@ -121,8 +122,11 @@ jobs:
             --source "https://nuget.pkg.github.com/${GITHUB_REPOSITORY_OWNER}/index.json"
           echo "Published gcp-windows-gitops-demo-sevendemo ${PACKAGE_VERSION} to GitHub Packages." \
             >> "$GITHUB_STEP_SUMMARY"
+          echo "Package page: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pkgs/nuget/gcp-windows-gitops-demo-sevendemo" \
+            >> "$GITHUB_STEP_SUMMARY"
 
       - name: Mock upload SevenDemo ZIP to Conexus
+        id: mock-conexus
         if: steps.sevendemo.outputs.available == 'true'
         env:
           PACKAGE_VERSION: ${{ steps.publish-sevendemo.outputs.package_version }}
@@ -154,9 +158,67 @@ jobs:
         run: echo "SevenDemo package publication skipped (sample project mode with Visual Studio is required)." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Report GitHub Actions conclusion
-        # Always leave a short result in the run summary, including on submission failure.
+        # Always summarize the build result and any resources intentionally retained.
         if: always()
         env:
           JOB_STATUS: ${{ job.status }}
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          KEEP_FAILED_VM: ${{ vars.KEEP_FAILED_VM || 'false' }}
+          SEVENDEMO_AVAILABLE: ${{ steps.sevendemo.outputs.available }}
+          GCS_ARTIFACT_OUTCOME: ${{ steps.download-sevendemo.outcome }}
+          GITHUB_PACKAGE_OUTCOME: ${{ steps.publish-sevendemo.outcome }}
+          CONEXUS_MOCK_OUTCOME: ${{ steps.mock-conexus.outcome }}
         run: |
-          echo "GitHub Actions result: ${JOB_STATUS}" >> "$GITHUB_STEP_SUMMARY"
+          APP_VERSION="$(tr -d '[:space:]' < applications/sample/VERSION 2>/dev/null || echo 'unavailable')"
+          {
+            echo "## Windows image build conclusion"
+            echo
+            echo "- **Project:** SevenDemo / Windows runner image"
+            echo "- **GCP project:** ${GCP_PROJECT_ID:-not configured}"
+            echo "- **Application version:** ${APP_VERSION}"
+            echo "- **Build result:** ${JOB_STATUS}"
+            echo "- **GitHub run:** ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$SEVENDEMO_AVAILABLE" == "false" ]]; then
+            {
+              echo "- **SevenDemo artifact storage:** Not applicable; this configuration does not produce SevenDemo."
+              echo "- **GitHub Packages:** Not published."
+              echo "- **Conexus:** Mock upload not run."
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$SEVENDEMO_AVAILABLE" == "true" && "$GCS_ARTIFACT_OUTCOME" == "success" ]]; then
+            {
+              echo "- **GCS artifact storage:** Success; ZIP downloaded from the staging bucket and verified as non-empty."
+              echo "- **GitHub Packages:** ${GITHUB_PACKAGE_OUTCOME} ([view package](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pkgs/nuget/gcp-windows-gitops-demo-sevendemo))."
+              echo "- **Conexus mock:** ${CONEXUS_MOCK_OUTCOME}; simulated only, not uploaded."
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$SEVENDEMO_AVAILABLE" == "true" && "$GCS_ARTIFACT_OUTCOME" == "failure" ]]; then
+            {
+              echo "- **GCS artifact storage:** Failure to verify; GitHub Actions could not retrieve and verify the ZIP from the staging bucket, so storage is unconfirmed."
+              echo "- **GitHub Packages:** ${GITHUB_PACKAGE_OUTCOME} ([view package](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pkgs/nuget/gcp-windows-gitops-demo-sevendemo))."
+              echo "- **Conexus mock:** ${CONEXUS_MOCK_OUTCOME}; simulated only, not uploaded."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "- **GCS artifact storage:** Not verified; the build did not reach artifact download."
+              echo "- **GitHub Packages:** Not verified or published."
+              echo "- **Conexus mock:** Not run; no artifact was verified."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ "$KEEP_FAILED_VM" == "true" ]]; then
+            if [[ "$JOB_STATUS" != "success" ]]; then
+              {
+                echo
+                echo "> **Warning:** \`KEEP_FAILED_VM=true\`; because this run did not succeed, image-build VM resources may remain in GCP and should be inspected and deleted when no longer needed."
+              } >> "$GITHUB_STEP_SUMMARY"
+            else
+              {
+                echo
+                echo "> \`KEEP_FAILED_VM=true\` only retains temporary VMs on build failure; this successful run cleans up its builder and smoke-test VMs."
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            {
+              echo
+              echo "> The successful custom Compute Engine image and published NuGet package are retained for reuse; temporary builder and smoke-test VMs are removed."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

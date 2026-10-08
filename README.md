@@ -190,6 +190,9 @@ deployment workflow; Dev and Prod run independently using the `NODE_COUNT` in
 each manifest (2 and 4 respectively). Each demo endpoint is available for the
 configured viewing window, after which that environment's worker VMs are
 removed. The separate load balancer frontends remain ready for the next run.
+Each workflow's conclusion summary identifies the project and result, warns
+about resources that persist after teardown, and prints the IAP tunnel command
+for the management station when its environment flag is enabled.
 Protect `main` and require pull-request validation and human approval before
 allowing deployment-state changes.
 
@@ -475,6 +478,8 @@ published separately. In GitHub Packages, use the NuGet registry for this
 repository; the `.nupkg` contains the application archive at
 `tools/SevenDemo.zip`. A build with `VS_INSTALL_MODE=disabled` skips package
 publication because it does not produce the compiled demo.
+
+View the [SevenDemo package in GitHub Packages](https://github.com/Deck-J/GCP_Windows_GitOps_Demo/pkgs/nuget/gcp-windows-gitops-demo-sevendemo).
 
 ### Conexus upload demonstration (mock)
 

@@ -72,9 +72,35 @@ jobs:
             --substitutions="_ZONE=${GCP_ZONE},_APP_NAME=dev-iis-demo,_DEPLOYMENT_MANIFEST=environments/dev/deployment.env,_TEARDOWN_DELAY_SECONDS=${TEARDOWN_DELAY_SECONDS},_DYNATRACE_ENABLED=${DYNATRACE_ENABLED},_DYNATRACE_ENVIRONMENT_URL=${DYNATRACE_ENVIRONMENT_URL},_DYNATRACE_TOKEN_SECRET=${DYNATRACE_TOKEN_SECRET},_DYNATRACE_RUNTIME_SERVICE_ACCOUNT=${DYNATRACE_RUNTIME_SERVICE_ACCOUNT},_DYNATRACE_MONITORING_MODE=${DYNATRACE_MONITORING_MODE},_DYNATRACE_HOST_GROUP=${DYNATRACE_HOST_GROUP},_DYNATRACE_NETWORK_ZONE=${DYNATRACE_NETWORK_ZONE},_MANAGEMENT_STATION_ENABLED=${MANAGEMENT_STATION_ENABLED}"
 
       - name: Report GitHub Actions conclusion
-        # Preserve the final result in the summary even if Cloud Build submission fails.
+        # Report deployment result and persistent management-station access details.
         if: always()
         env:
           JOB_STATUS: ${{ job.status }}
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+          GCP_ZONE: ${{ vars.GCP_ZONE || 'us-central1-a' }}
+          MANAGEMENT_STATION_ENABLED: ${{ vars.DEV_MANAGEMENT_STATION_ENABLED || 'false' }}
         run: |
-          echo "GitHub Actions result: ${JOB_STATUS}" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Development deployment conclusion"
+            echo
+            echo "- **Project:** Development (\`dev-iis-demo\`)"
+            echo "- **GCP project:** ${GCP_PROJECT_ID:-not configured}"
+            echo "- **Build/deployment result:** ${JOB_STATUS}"
+            echo "- **GitHub run:** ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo
+            echo "> **Persistent infrastructure:** The Dev load balancer, forwarding address, health check, and firewall rule remain after worker teardown and may continue to incur charges."
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$MANAGEMENT_STATION_ENABLED" == "true" ]]; then
+            {
+              echo
+              echo "> **Warning: management station enabled.** The private Dev management station and its RDP firewall rules are configured to remain after worker teardown and continue to incur GCP charges until disabled or deleted."
+              echo
+              echo "The station has no public URL. Start an IAP tunnel, then connect an RDP client to \`localhost:3389\`: "
+              echo
+              echo '```bash'
+              echo "gcloud compute start-iap-tunnel dev-iis-demo-management 3389 --local-host-port=localhost:3389 --project=${GCP_PROJECT_ID} --zone=${GCP_ZONE}"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- **Management station:** Disabled; no persistent station is configured." >> "$GITHUB_STEP_SUMMARY"
+          fi
