@@ -71,6 +71,7 @@ styles.add(ParagraphStyle(
 
 
 def escape(text):
+    """Translate the README's small Markdown subset into ReportLab paragraph markup."""
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     text = re.sub(r"`([^`]+)`", r"<font name='Courier'>\1</font>", text)
     text = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", text)
@@ -79,6 +80,7 @@ def escape(text):
 
 
 def add_diagram(story, diagram_index):
+    """Place a rendered Mermaid diagram, splitting tall images across pages."""
     source = DIAGRAM_DIR / f"diagram-{diagram_index}.png"
     if not source.exists():
         story.append(Paragraph("Diagram asset unavailable.", styles["SmallNote"]))
@@ -106,6 +108,7 @@ def add_diagram(story, diagram_index):
 
 
 def render_diagrams(lines):
+    """Extract Mermaid fences, render PNGs, and keep assets under .pdfgen/."""
     DIAGRAM_DIR.mkdir(parents=True, exist_ok=True)
     diagram_index = 0
     line_index = 0
@@ -130,6 +133,7 @@ def render_diagrams(lines):
 
 
 def add_table(story, rows):
+    """Render accumulated Markdown table rows with a repeated header."""
     data = []
     for row_index, row in enumerate(rows):
         cells = [Paragraph(escape(cell.strip()), styles["TableHeader" if row_index == 0 else "TableText"]) for cell in row]
@@ -154,6 +158,7 @@ def add_table(story, rows):
 
 
 def build_story():
+    """Convert README blocks into ReportLab flowables while preserving order."""
     lines = SOURCE.read_text(encoding="utf-8").splitlines()
     render_diagrams(lines)
     story = []
@@ -232,6 +237,7 @@ def build_story():
 
 
 def draw_page(canvas, doc):
+    """Draw the shared footer on every generated PDF page."""
     canvas.saveState()
     canvas.setStrokeColor(colors.HexColor("#D4DEE2"))
     canvas.line(MARGIN, 0.48 * inch, PAGE_WIDTH - MARGIN, 0.48 * inch)
@@ -243,6 +249,7 @@ def draw_page(canvas, doc):
 
 
 def main():
+    """Build README.pdf from the current README and its rendered diagrams."""
     document = SimpleDocTemplate(
         str(OUTPUT), pagesize=letter, rightMargin=MARGIN, leftMargin=MARGIN,
         topMargin=0.58 * inch, bottomMargin=0.65 * inch,

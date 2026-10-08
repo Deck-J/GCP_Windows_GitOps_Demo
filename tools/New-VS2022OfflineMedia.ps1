@@ -17,6 +17,9 @@ $bootstrapperUris = @{
     Community    = 'https://aka.ms/vs/17/release/vs_community.exe'
 }
 
+# Build the layout locally on Windows because producing the ISO requires the
+# Windows ADK's oscdimg.exe; the generated image is uploaded to the restricted
+# bucket read by the temporary image-builder identity.
 New-Item -Path $LayoutPath -ItemType Directory -Force | Out-Null
 New-Item -Path (Split-Path $IsoPath -Parent) -ItemType Directory -Force | Out-Null
 
@@ -28,6 +31,8 @@ $layoutArgs = "--layout `"$LayoutPath`" --config `"$ConfigPath`" --lang $Languag
 $layout = Start-Process -FilePath $bootstrapper -ArgumentList $layoutArgs -Wait -PassThru
 if ($layout.ExitCode -notin @(0, 3010)) { throw "Layout creation failed with exit code $($layout.ExitCode)" }
 
+# Verify downloaded package completeness before wrapping the layout as media;
+# this catches missing packages before the long-running Cloud Build image job.
 Write-Host 'Verifying the offline layout'
 $verify = Start-Process -FilePath $bootstrapper -ArgumentList "--layout `"$LayoutPath`" --verify --wait" -Wait -PassThru
 if ($verify.ExitCode -ne 0) { throw "Layout verification failed with exit code $($verify.ExitCode)" }

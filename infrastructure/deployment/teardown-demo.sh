@@ -26,6 +26,8 @@ exists() {
   gcloud "$@" --project="$PROJECT_ID" >/dev/null 2>&1
 }
 
+# Discover only groups carrying this environment's app prefix and blue/green
+# suffix. Never use a project-wide VM sweep, which could affect unrelated apps.
 log "[TEARDOWN 1/2] Drain temporary $APP_NAME blue/green backends"
 mapfile -t GROUPS < <(
   gcloud compute instance-groups unmanaged list --project="$PROJECT_ID" \
@@ -47,6 +49,8 @@ for group in "${GROUPS[@]}"; do
     fi
   fi
 
+  # Delete the group before its members; if group removal fails, preserve the
+  # VMs rather than leaving them detached from a backend unexpectedly.
   mapfile -t VMS < <(
     gcloud compute instance-groups unmanaged list-instances "$group" \
       --project="$PROJECT_ID" --zone="$ZONE" --format='value(instance.basename())' 2>/dev/null || true

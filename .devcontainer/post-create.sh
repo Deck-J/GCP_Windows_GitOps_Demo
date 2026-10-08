@@ -4,6 +4,8 @@ set -Eeuo pipefail
 
 cd "${CONTAINER_WORKSPACE_FOLDER:-$(git rev-parse --show-toplevel)}"
 
+# Git checkouts may not retain executable bits consistently across environments.
+# Restore script permissions before invoking validation or showing the next steps.
 find bootstrap infrastructure validation integrations .devcontainer -type f -name '*.sh' -exec chmod +x {} +
 
 echo "Codespace toolchain"

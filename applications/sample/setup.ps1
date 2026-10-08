@@ -9,5 +9,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Install the application and its dependencies here. Keep secrets in Secret Manager.
+# The image pipeline calls this hook with the build workspace, target install
+# directory, release version, and source revision. Install project dependencies
+# here, but retrieve any sensitive configuration from Secret Manager.
 Write-Output "PROJECT_SETUP_PASS|Custom setup hook completed for version $AppVersion ($SourceRevision)"

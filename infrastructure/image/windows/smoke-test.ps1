@@ -21,6 +21,8 @@ function Get-MetadataValue([string]$Key, [string]$DefaultValue = '') {
 }
 
 try {
+    # Run these checks on a fresh VM booted from the captured image, not on the
+    # builder. This catches Sysprep/startup regressions before an image is published.
     $projectMode = (Get-MetadataValue 'project-mode' 'sample').ToLowerInvariant()
     Write-DemoStage 1 4 'Verify required files and installed Windows features'
     $checks = [ordered]@{
@@ -60,6 +62,8 @@ try {
                 Write-DemoPass 'Visual Studio IDE' 'devenv.exe is present and the sample was built with devenv.com'
             }
             Write-DemoPass 'MSBuild' 'MSBuild executed successfully'
+            # The demo is compiled during image creation; execute the published
+            # artifact again here to prove it survived capture and first boot.
             Write-DemoStage 3 4 'Execute compiled .NET 7 / C# 7 demonstration application'
             $demoDll = 'C:\DemoArtifacts\SevenDemo\SevenDemo.dll'
             if (-not (Test-Path $demoDll)) { throw 'SevenDemo.dll is missing' }

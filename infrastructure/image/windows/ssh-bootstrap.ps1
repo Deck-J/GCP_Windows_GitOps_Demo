@@ -1,8 +1,14 @@
 # Bootstrap only the ephemeral SSH channel used by the image pipeline.
+# The pipeline creates a fresh Ed25519 key for each build, passes only its
+# public half through instance metadata, and deletes the private key at exit.
+# This startup script deliberately installs no app/toolchain content; that is
+# provisioned separately by bootstrap.ps1 over the short-lived IAP tunnel.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 function Get-MetadataValue([string]$Key, [string]$DefaultValue = '') {
+    # Optional metadata is allowed to use a safe default; required SSH values
+    # are validated by the caller before any account or firewall is configured.
     try {
         $headers = @{ 'Metadata-Flavor' = 'Google' }
         return Invoke-RestMethod -Headers $headers -Uri "http://metadata.google.internal/computeMetadata/v1/instance/attributes/$Key"

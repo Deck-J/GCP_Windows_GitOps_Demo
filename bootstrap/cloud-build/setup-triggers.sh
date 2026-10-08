@@ -44,6 +44,8 @@ create_trigger() {
   local substitutions="${5:-}"
   local trigger_exists=false
   local -a command
+  # Make setup safe to rerun: preserve an existing trigger's identity while
+  # refreshing its config/filter/substitutions to match this checked-out repo.
   if gcloud builds triggers describe "$name" --project="$PROJECT_ID" \
     --region=global >/dev/null 2>&1; then
     trigger_exists=true
@@ -88,6 +90,8 @@ create_trigger() {
   "${command[@]}"
 }
 
+# Keep deployment filters environment-specific so a Dev manifest edit cannot
+# launch a Prod deployment (or vice versa).
 create_trigger "validate-pull-requests" "cloudbuild/cloudbuild-validate.yaml" \
   "pull-request"
 create_trigger "build-windows-image" "cloudbuild/cloudbuild-image.yaml" "push" \

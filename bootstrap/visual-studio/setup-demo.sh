@@ -16,6 +16,8 @@ BUILDER_SA="${BUILDER_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 gcloud services enable compute.googleapis.com cloudbuild.googleapis.com secretmanager.googleapis.com storage.googleapis.com \
   --project="$PROJECT_ID"
 
+# Offline media is read by a separate builder identity; Cloud Build may impersonate
+# that identity but does not receive broad access to the media bucket itself.
 if ! gcloud iam service-accounts describe "$BUILDER_SA" --project="$PROJECT_ID" >/dev/null 2>&1; then
   gcloud iam service-accounts create "$BUILDER_SA_NAME" \
     --project="$PROJECT_ID" --display-name="Temporary Windows image builder"
@@ -49,6 +51,8 @@ if [[ "$VS_EDITION" != "community" ]]; then
     --role=roles/secretmanager.secretAccessor
 fi
 
+# Scope Cloud Build's impersonation grant to this builder account. The edition-
+# specific secret grant above is omitted for Community, which needs no product key.
 gcloud iam service-accounts add-iam-policy-binding "$BUILDER_SA" \
   --project="$PROJECT_ID" \
   --member="serviceAccount:$BUILD_SERVICE_ACCOUNT" \

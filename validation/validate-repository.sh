@@ -13,6 +13,8 @@ done
 echo "[PASS] Bash syntax (${#BASH_FILES[@]} files)"
 
 for environment in dev prod; do
+  # These are intentional demo topologies; fail validation if docs and
+  # deployment behavior drift from the requested two-node Dev/four-node Prod.
   manifest="environments/$environment/deployment.env"
   expected_nodes=2
   [[ "$environment" == "prod" ]] && expected_nodes=4

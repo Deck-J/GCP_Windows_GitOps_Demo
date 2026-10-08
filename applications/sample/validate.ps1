@@ -7,5 +7,6 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Return a nonzero exit code when the application is not runnable.
+# The image builder and post-capture smoke VM both call this hook. Replace the
+# placeholder with deterministic checks and throw/exit nonzero on any failure.
 Write-Output "PROJECT_VALIDATE_PASS|Custom validation hook completed for version $AppVersion"

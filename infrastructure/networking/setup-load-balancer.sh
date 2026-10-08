@@ -47,9 +47,13 @@ exists() {
   gcloud "$@" --project="$PROJECT_ID" >/dev/null 2>&1
 }
 
+# Names include the environment's app name so Dev and Prod can keep independent
+# frontends and backends while sharing the repository's provisioning logic.
 printf '[INFO] Provisioning %s load balancer in project %s (zone=%s network=%s subnet=%s)\n' \
   "$LB_TYPE" "$PROJECT_ID" "${ZONE:-unspecified}" "$NETWORK" "$SUBNET"
 
+# Only Google health-check probe ranges may reach the application port through
+# this rule. Each environment gets its own target tag and rule for isolation.
 if ! exists compute firewall-rules describe "$FIREWALL"; then
   gcloud compute firewall-rules create "$FIREWALL" \
     --project="$PROJECT_ID" --network="$NETWORK" \
@@ -58,7 +62,10 @@ if ! exists compute firewall-rules describe "$FIREWALL"; then
     --target-tags=allow-health-check
 fi
 
+# The probe protocol/path must agree with the backend service configured below.
 if ! exists compute health-checks describe "$HEALTH_CHECK"; then
+  # HTTP uses URL map -> HTTP proxy; TCP uses a TCP proxy directly. The public
+  # address and forwarding rule are created once and reused across demo runs.
   if [[ "$LB_TYPE" == "HTTP" ]]; then
     gcloud compute health-checks create http "$HEALTH_CHECK" \
       --project="$PROJECT_ID" --port="$PORT" --request-path="$HEALTH_CHECK_PATH" \

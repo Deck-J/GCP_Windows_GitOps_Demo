@@ -54,6 +54,8 @@ REQUIRED_APIS=(
   sts.googleapis.com
 )
 
+# Compare the project-wide API list once, then print only the services this demo needs
+# but cannot use yet. Enabling services is left to an administrator, not this check.
 mapfile -t ENABLED_APIS < <(
   gcloud services list --enabled --project="$PROJECT_ID" --format='value(config.name)'
 )

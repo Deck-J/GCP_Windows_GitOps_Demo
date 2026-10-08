@@ -34,6 +34,8 @@ countdown() {
   done
 }
 
+# Keep validation status separate from teardown status: a successful cleanup
+# must never hide a failed deployment, and cleanup failure must fail the build.
 if ! [[ "$APP_NAME" =~ ^[a-z]([-a-z0-9]*[a-z0-9])?$ ]] || (( ${#APP_NAME} > 32 )); then
   log "[FAIL] APP_NAME must be a lowercase GCP-safe name of at most 32 characters"
   exit 2
@@ -48,6 +50,8 @@ fi
   exit 2
 }
 
+# Deployment receives the environment manifest explicitly; that file selects
+# image/color and the required worker count without changing the other environment.
 log "[DEMO 1/5] Start blue/green deployment and application validation"
 set +e
 bash infrastructure/deployment/deploy-blue-green.sh \
@@ -67,6 +71,8 @@ else
   log "DEMO_DEPLOY_STATUS=FAILURE"
 fi
 
+# The load balancer remains provisioned after the viewing window; only temporary
+# worker VMs/groups are removed so the next trigger run can reuse the endpoint.
 log "[DEMO 3/5] Keep the environment available for ${TEARDOWN_DELAY_SECONDS} seconds"
 countdown "$TEARDOWN_DELAY_SECONDS"
 

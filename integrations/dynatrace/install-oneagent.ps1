@@ -45,6 +45,8 @@ function Get-SecretValue([string]$SecretName) {
 }
 
 try {
+    # Runtime metadata carries only the secret's name. Fetch the actual token
+    # using the VM identity so no reusable credential is baked into the image.
     $enabled = (Get-MetadataValue 'dynatrace-enabled' 'false').ToLowerInvariant()
     if ($enabled -ne 'true') {
         Write-Output 'DYNATRACE_DISABLED'
@@ -84,6 +86,7 @@ try {
     $downloadHeaders = $null
     $dynatraceToken = $null
 
+    # Verify publisher trust before executing a freshly downloaded privileged installer.
     $signature = Get-AuthenticodeSignature -FilePath $installer
     if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'Dynatrace') {
         throw "Dynatrace installer signature validation failed: $($signature.Status)"
@@ -118,6 +121,8 @@ try {
     Write-DynatracePass 'IIS restart' 'World Wide Web Publishing Service restarted'
 
     Write-DynatraceStage 5 5 'Validate OneAgent service and IIS health endpoint'
+    # Serial readiness is emitted only after both monitoring and the application
+    # are healthy; Cloud Build waits for this marker on every worker before routing.
     $deadline = (Get-Date).AddMinutes(5)
     do {
         $oneAgent = Get-Service | Where-Object { $_.DisplayName -like 'Dynatrace OneAgent*' } | Select-Object -First 1

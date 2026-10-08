@@ -23,6 +23,8 @@ if [[ ! -t 0 ]]; then
   echo "Run this setup interactively so the Dynatrace token can be entered without shell history"
   exit 1
 fi
+# Read from a terminal without echo so the token cannot leak through command
+# history, process arguments, or normal terminal output.
 read -rsp "Dynatrace InstallerDownload token: " DYNATRACE_TOKEN
 echo
 [[ -n "$DYNATRACE_TOKEN" && "$DYNATRACE_TOKEN" != *[[:space:]]* ]] || {
@@ -36,6 +38,8 @@ if ! gcloud iam service-accounts describe "$RUNTIME_SA" --project="$PROJECT_ID" 
     --display-name="Dynatrace demo runtime"
 fi
 
+# The installer token is written via stdin; then the local shell variable is
+# cleared before IAM bindings and human-readable setup output are produced.
 if ! gcloud secrets describe "$TOKEN_SECRET" --project="$PROJECT_ID" >/dev/null 2>&1; then
   gcloud secrets create "$TOKEN_SECRET" --project="$PROJECT_ID" --replication-policy=automatic
 fi
