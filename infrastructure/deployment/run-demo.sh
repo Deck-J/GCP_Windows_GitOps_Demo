@@ -86,6 +86,8 @@ log "[DEMO 4/5] Tear down this environment's blue/green worker nodes"
 set +e
 bash infrastructure/deployment/teardown-demo.sh "$PROJECT_ID" "$ZONE" "$APP_NAME"
 TEARDOWN_STATUS=$?
+bash infrastructure/deployment/verify-cleanup.sh "$PROJECT_ID" "$ZONE" "$APP_NAME" "$MANAGEMENT_STATION_ENABLED"
+VERIFY_STATUS=$?
 set -e
 
 if [[ "$DEPLOY_STATUS" -ne 0 ]]; then
@@ -93,6 +95,11 @@ if [[ "$DEPLOY_STATUS" -ne 0 ]]; then
     log "DEMO_TEARDOWN_STATUS=SUCCESS"
   else
     log "DEMO_TEARDOWN_STATUS=FAILURE"
+  fi
+  if [[ "$VERIFY_STATUS" -eq 0 ]]; then
+    log "DEMO_CLEANUP_VERIFY_STATUS=SUCCESS"
+  else
+    log "DEMO_CLEANUP_VERIFY_STATUS=FAILURE"
   fi
   log "[DEMO 5/5] [FAIL] Teardown ran after a failed demo; preserving the deployment failure status"
   exit "$DEPLOY_STATUS"
@@ -104,5 +111,13 @@ if [[ "$TEARDOWN_STATUS" -ne 0 ]]; then
   exit "$TEARDOWN_STATUS"
 fi
 
+if [[ "$VERIFY_STATUS" -ne 0 ]]; then
+  log "DEMO_TEARDOWN_STATUS=SUCCESS"
+  log "DEMO_CLEANUP_VERIFY_STATUS=FAILURE"
+  log "[DEMO 5/5] [FAIL] Application validation passed, but cleanup verification found leftovers"
+  exit "$VERIFY_STATUS"
+fi
+
 log "DEMO_TEARDOWN_STATUS=SUCCESS"
+log "DEMO_CLEANUP_VERIFY_STATUS=SUCCESS"
 log "[DEMO 5/5] [PASS] Demo completed and all runtime resources were removed"

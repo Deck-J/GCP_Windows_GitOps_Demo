@@ -20,6 +20,10 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: deploy-development
+  cancel-in-progress: false
+
 jobs:
   deploy:
     # Require main for automatic and manual runs, matching the WIF trust condition.

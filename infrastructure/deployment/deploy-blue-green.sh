@@ -45,6 +45,7 @@ SUBNET="${SUBNET:-default}"
 LB_TYPE="${LB_TYPE:-HTTP}"
 HEALTH_CHECK_PATH="${HEALTH_CHECK_PATH:-$PROJECT_HEALTH_PATH}"
 PORT="${PORT:-$PROJECT_HEALTH_PORT}"
+ENVIRONMENT="$(basename "$(dirname "$MANIFEST")")"
 
 # Resolve the selected color's image/version from the desired-state manifest.
 # The deployment never mutates the manifest; promotion is a reviewed Git change.
@@ -64,6 +65,9 @@ BACKEND="${APP_NAME}-backend"
 ADDRESS="${APP_NAME}-ip"
 VERSION_TOKEN="$(printf '%s' "$ACTIVE_VERSION" | tr '[:upper:].+_' '[:lower:]---' | tr -cd 'a-z0-9-' | cut -c1-10)"
 IMAGE_TOKEN="$(basename "$ACTIVE_IMAGE" | tr '[:upper:]_' '[:lower:]-' | tr -cd 'a-z0-9-' | tail -c 11)"
+RESOURCE_LABELS="app=gcp-windows-gitops-demo,environment=${ENVIRONMENT},app_name=${APP_NAME},managed_by=cloudbuild"
+MANAGEMENT_LABELS="${RESOURCE_LABELS},component=management"
+WORKER_LABELS="${RESOURCE_LABELS},component=runtime,color=${ACTIVE_COLOR},version=${VERSION_TOKEN}"
 MIG_SIZE="${NODE_COUNT:-}"
 [[ "$MIG_SIZE" =~ ^[1-9][0-9]*$ ]] || { log "[FAIL] NODE_COUNT must be a positive integer in $MANIFEST"; exit 1; }
 TARGET_GROUP="${APP_NAME}-${ACTIVE_COLOR}-n${MIG_SIZE}-${VERSION_TOKEN}-${IMAGE_TOKEN}"
@@ -162,7 +166,8 @@ if [[ "$MANAGEMENT_STATION_ENABLED" == "true" ]]; then
       --image-family=windows-2022 --image-project=windows-cloud \
       --network="$NETWORK" --subnet="$SUBNET" --no-address \
       --boot-disk-size=100GB --boot-disk-type=pd-balanced \
-      --no-service-account --no-scopes --tags="$MANAGEMENT_TAG"
+      --no-service-account --no-scopes --tags="$MANAGEMENT_TAG" \
+      --labels="$MANAGEMENT_LABELS"
   fi
   MANAGEMENT_IP="$(gcloud compute instances describe "$MANAGEMENT_VM" \
     --project="$PROJECT_ID" --zone="$ZONE" \
@@ -198,7 +203,8 @@ fi
 
 if ! exists compute instance-groups unmanaged describe "$TARGET_GROUP" --zone="$ZONE"; then
   gcloud compute instance-groups unmanaged create "$TARGET_GROUP" \
-    --project="$PROJECT_ID" --zone="$ZONE" --network="$NETWORK"
+    --project="$PROJECT_ID" --zone="$ZONE" --network="$NETWORK" \
+    --description="app=gcp-windows-gitops-demo,environment=${ENVIRONMENT},app_name=${APP_NAME},managed_by=cloudbuild,component=runtime_group,color=${ACTIVE_COLOR},version=${VERSION_TOKEN}"
 fi
 # Reuse a matching target group/VM set when possible, then attach only the
 # selected deployment's workers to the persistent backend service.
@@ -215,6 +221,7 @@ for target_vm in "${TARGET_VMS[@]}"; do
       --network="$NETWORK" --subnet="$SUBNET" --no-address \
       --boot-disk-size=200GB --boot-disk-type=pd-balanced \
       --tags="$WORKER_TAGS" \
+      --labels="$WORKER_LABELS" \
       "${SERVICE_ACCOUNT_ARGS[@]}" \
       --metadata="$METADATA" \
       "${STARTUP_ARGS[@]}"

@@ -79,6 +79,11 @@ REVISION_TOKEN="$(printf '%s' "$SOURCE_REVISION" | tr '[:upper:]_' '[:lower:]-' 
 [[ -z "$REVISION_TOKEN" ]] && REVISION_TOKEN="$BUILD_TOKEN"
 IMAGE_NAME="${IMAGE_FAMILY}-${VERSION_TOKEN}-${REVISION_TOKEN}"
 IMAGE_NAME="$(printf '%s' "$IMAGE_NAME" | cut -c1-63 | sed 's/-$//')"
+LABEL_VERSION_TOKEN="$(printf '%s' "$VERSION_TOKEN" | cut -c1-63)"
+BASE_LABELS="app=gcp-windows-gitops-demo,environment=image,managed_by=cloudbuild,build_id=${BUILD_TOKEN}"
+BUILDER_LABELS="${BASE_LABELS},component=image_build,version=${LABEL_VERSION_TOKEN}"
+SMOKE_LABELS="${BASE_LABELS},component=smoke_test,version=${LABEL_VERSION_TOKEN}"
+IMAGE_LABELS="${BASE_LABELS},component=custom_image,version=${LABEL_VERSION_TOKEN}"
 SSH_TAG="${BUILD_VM}-ssh"
 SSH_FIREWALL="${BUILD_VM}-iap-ssh"
 RDP_TAG="${BUILD_VM}-iap-rdp"
@@ -329,6 +334,7 @@ gcloud compute instances create "$BUILD_VM" \
   --boot-disk-size=200GB \
   --boot-disk-type=pd-balanced \
   --tags="$INSTANCE_TAGS" \
+  --labels="$BUILDER_LABELS" \
   "${SERVICE_ACCOUNT_ARGS[@]}" \
   --metadata="ephemeral-ssh-user=${SSH_USER},ephemeral-ssh-public-key=${SSH_PUBLIC_KEY},runner-version=${RUNNER_VERSION},vs-install-mode=${VS_INSTALL_MODE},vs-edition=${VS_EDITION},vs-media-uri=${VS_MEDIA_URI},vs-product-key-secret=${VS_PRODUCT_KEY_SECRET},vs-config-b64=${VS_CONFIG_B64},demo-project-b64=${DEMO_PROJECT_B64},demo-program-b64=${DEMO_PROGRAM_B64},demo-global-json-b64=${DEMO_GLOBAL_JSON_B64},project-mode=${PROJECT_MODE},project-setup-b64=${PROJECT_SETUP_B64},project-validate-b64=${PROJECT_VALIDATE_B64},project-health-path=${PROJECT_HEALTH_PATH},project-health-port=${PROJECT_HEALTH_PORT},app-version=${APP_VERSION},source-revision=${SOURCE_REVISION},app-index-b64=${APP_INDEX_B64},app-health-b64=${APP_HEALTH_B64}" \
   --metadata-from-file=windows-startup-script-ps1=infrastructure/image/windows/ssh-bootstrap.ps1
@@ -374,6 +380,7 @@ gcloud compute images create "$IMAGE_NAME" \
   --source-disk="$SOURCE_DISK" \
   --source-disk-zone="$ZONE" \
   --family="$IMAGE_FAMILY" \
+  --labels="$IMAGE_LABELS" \
   --description="Windows GitHub runner image built by Cloud Build ${BUILD_ID_RAW}"
 
 pipeline_stage 5 "Create and stream smoke-test VM $TEST_VM"
@@ -389,6 +396,7 @@ gcloud compute instances create "$TEST_VM" \
   --no-service-account \
   --no-scopes \
   --tags="$SSH_TAG" \
+  --labels="$SMOKE_LABELS" \
   --metadata="ephemeral-ssh-user=${SSH_USER},ephemeral-ssh-public-key=${SSH_PUBLIC_KEY}" \
   --metadata-from-file=windows-startup-script-ps1=infrastructure/image/windows/ssh-bootstrap.ps1
 

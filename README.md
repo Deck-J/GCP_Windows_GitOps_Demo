@@ -183,13 +183,16 @@ conclusion, while streaming the Cloud Build logs. The logs contain the
 immutable image name. After the image passes its smoke test, the workflow also
 retrieves the published SevenDemo ZIP from the staging bucket, wraps it in a
 versioned NuGet package, and pushes that package to GitHub Packages using the
-workflow's `GITHUB_TOKEN`. Update the inactive color's image and version plus
-`ACTIVE_COLOR` in the target environment's manifest, then submit that change as
-a reviewed pull request. A matching manifest push starts that environment's
-deployment workflow; Dev and Prod run independently using the `NODE_COUNT` in
-each manifest (2 and 4 respectively). Each demo endpoint is available for the
-configured viewing window, after which that environment's worker VMs are
-removed. The separate load balancer frontends remain ready for the next run.
+workflow's `GITHUB_TOKEN`. Run the `Promote image` workflow to update the
+inactive color's image and version plus `ACTIVE_COLOR` in the target
+environment's manifest and open a reviewed pull request. A matching manifest
+push starts that environment's deployment workflow; Dev and Prod run
+independently using the `NODE_COUNT` in each manifest (2 and 4 respectively).
+Each environment deployment has its own concurrency group, so a second Dev run
+waits behind an active Dev run while Prod can still proceed independently.
+Each demo endpoint is available for the configured viewing window, after which
+that environment's worker VMs are removed and verified absent. The separate
+load balancer frontends remain ready for the next run.
 Each workflow's conclusion summary identifies the project and result, warns
 about resources that persist after teardown, and prints the IAP tunnel command
 for the management station when its environment flag is enabled.
@@ -616,8 +619,9 @@ The image and environment deployment pipelines are formatted for a live demonstr
 
 ## GitOps blue/green pipeline
 
-The deployment manifest is the reviewed source of truth. No CI identity writes
-back to GitHub or creates promotion pull requests.
+The deployment manifest is the reviewed source of truth. CI can prepare a
+promotion branch and pull request, but traffic changes only after that manifest
+change is reviewed, merged, and reconciled from `main`.
 
 1. Change `applications/sample/src/index.html` or `applications/sample/src/health.html` and increment
   `applications/sample/VERSION`.
@@ -625,19 +629,26 @@ back to GitHub or creates promotion pull requests.
 3. The `Build Windows image` GitHub Actions workflow submits a Cloud Build
   job that creates and smoke-tests an immutable Windows image. Copy its image
   name from the Cloud Build logs linked from the Actions run.
-4. Update the inactive color's image and version in
-  `environments/dev/deployment.env`, and set `ACTIVE_COLOR` to that color.
+4. Run the `Promote image` workflow for `dev` with the immutable image name and
+  version. By default it writes the inactive color in
+  `environments/dev/deployment.env` and sets `ACTIVE_COLOR` to that color.
    Dev has `NODE_COUNT=2`; both IIS workers must pass health checks.
-5. Open and review a pull request containing the Dev manifest change. Merging
-  it starts the `Deploy development` workflow.
-6. After Dev validation, promote the same image by updating the inactive color
-  in `environments/prod/deployment.env`. Prod has `NODE_COUNT=4`.
+5. Review and merge the generated Dev promotion pull request. Merging it starts
+  the `Deploy development` workflow.
+6. After Dev validation, run the same `Promote image` workflow for `prod`.
+  Prod has `NODE_COUNT=4`.
 7. Review and merge the Prod manifest change to start the `Deploy production`
   workflow. Each environment has its own load balancer, health check, and address.
 8. Each endpoint remains available for 10 minutes after validation. Teardown
-  removes that environment's workers on success or failure but leaves its
-  load balancer ready for the next run. The manifests and immutable image
-  remain available for subsequent deployments.
+  removes that environment's workers on success or failure, verifies no
+  blue/green runtime leftovers remain, and leaves its load balancer ready for
+  the next run. The manifests and immutable image remain available for
+  subsequent deployments.
+
+Cloud Build labels created VMs and images with ownership, environment, component,
+version, and build metadata where Compute Engine supports labels. Unmanaged
+instance groups carry the same ownership fields in their description because
+GCP does not support labels on those resources.
 
 The first deployment seeds one color, so it has no preexisting rollback color.
 After the next successful promotion, both blue and green are populated.

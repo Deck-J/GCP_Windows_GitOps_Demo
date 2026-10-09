@@ -1,0 +1,130 @@
+name: Promote image
+run-name: Promote ${{ inputs.environment }} image ${{ inputs.version }}
+
+# Creates a reviewed GitOps pull request that moves a desired-state manifest to
+# a new immutable image/version. The deployment workflow runs only after merge.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment manifest to update.
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+      image_name:
+        description: Immutable Compute Engine image name to promote.
+        required: true
+        type: string
+      version:
+        description: Application version to promote.
+        required: true
+        type: string
+      color:
+        description: Target color. Use inactive for normal blue/green promotion.
+        required: true
+        default: inactive
+        type: choice
+        options:
+          - inactive
+          - blue
+          - green
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: promote-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Update desired-state manifest
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          VERSION: ${{ inputs.version }}
+          COLOR: ${{ inputs.color }}
+        run: |
+          set -euo pipefail
+          [[ "$ENVIRONMENT" =~ ^(dev|prod)$ ]] || { echo "Invalid environment"; exit 2; }
+          [[ "$IMAGE_NAME" =~ ^[A-Za-z0-9._:/-]+$ ]] || { echo "Invalid image name"; exit 2; }
+          [[ "$VERSION" =~ ^[A-Za-z0-9._+:-]+$ ]] || { echo "Invalid version"; exit 2; }
+          [[ "$COLOR" =~ ^(inactive|blue|green)$ ]] || { echo "Invalid color"; exit 2; }
+
+          manifest="environments/${ENVIRONMENT}/deployment.env"
+          # shellcheck disable=SC1090
+          source "$manifest"
+          [[ "${ACTIVE_COLOR:-}" =~ ^(blue|green)$ ]] || { echo "Invalid ACTIVE_COLOR in $manifest"; exit 2; }
+          target_color="$COLOR"
+          if [[ "$target_color" == "inactive" ]]; then
+            if [[ "$ACTIVE_COLOR" == "blue" ]]; then
+              target_color="green"
+            else
+              target_color="blue"
+            fi
+          fi
+
+          upper_color="${target_color^^}"
+          python3 - "$manifest" "$target_color" "$upper_color" "$IMAGE_NAME" "$VERSION" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          manifest, target_color, upper_color, image_name, version = sys.argv[1:]
+          path = Path(manifest)
+          text = path.read_text()
+          replacements = {
+              "ACTIVE_COLOR": target_color,
+              f"{upper_color}_IMAGE": image_name,
+              f"{upper_color}_VERSION": version,
+          }
+          for key, value in replacements.items():
+              pattern = re.compile(rf"^{re.escape(key)}=.*$", re.MULTILINE)
+              if not pattern.search(text):
+                  raise SystemExit(f"{key} is missing from {manifest}")
+              text = pattern.sub(f"{key}={value}", text)
+          path.write_text(text)
+          PY
+
+          echo "manifest=$manifest" >> "$GITHUB_ENV"
+          echo "target_color=$target_color" >> "$GITHUB_ENV"
+
+      - name: Open promotion pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- "$manifest"; then
+            {
+              echo "## Promotion skipped"
+              echo
+              echo "$manifest already points ${target_color} at \`$IMAGE_NAME\` version \`$VERSION\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          safe_version="$(printf '%s' "$VERSION" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9._-' | cut -c1-32)"
+          [[ -n "$safe_version" ]] || safe_version="image"
+          branch="promote/${ENVIRONMENT}-${safe_version}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git switch -c "$branch"
+          git add "$manifest"
+          git commit -m "Promote ${ENVIRONMENT} to ${VERSION}"
+          git push --set-upstream origin "$branch"
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --title "Promote ${ENVIRONMENT} to ${VERSION}" \
+            --body "Promotes \`${ENVIRONMENT}\` to image \`${IMAGE_NAME}\` on the \`${target_color}\` color."
