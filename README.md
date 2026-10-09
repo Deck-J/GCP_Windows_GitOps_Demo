@@ -196,6 +196,21 @@ for the management station when its environment flag is enabled.
 Protect `main` and require pull-request validation and human approval before
 allowing deployment-state changes.
 
+Before a live demo, run the read-only preflight check from an administrator
+environment:
+
+```bash
+validation/preflight.sh PROJECT_ID us-central1-a
+```
+
+If a demo is interrupted and needs cleanup, start with the guarded reset plan:
+
+```bash
+infrastructure/deployment/reset-demo.sh --project PROJECT_ID --environment all --zone us-central1-a
+```
+
+See `RESET.md` before using `--apply` or deleting generated images.
+
 ### GitHub Actions authentication setup
 
 All authenticated workflows use Workload Identity Federation; no
@@ -379,22 +394,24 @@ VS 2022 Community layout ISO
           4. Compile .NET 7 / C# 7 demo with MSBuild
           5. Execute and validate compiled application
           6. Validate devenv.exe and MSBuild
-          ### One-time administrator bootstrap
+          7. Run project setup and validation hooks
           8. Sysprep and capture image
-          Configure the GitHub Actions Workload Identity Federation provider and repository variables described in the GitHub Actions authentication section.
-Community Edition does not use a product key, so the default path does not
-          GitHub Actions submits image and deployment jobs to Cloud Build. No native Cloud Build triggers are used.
-`--productKey` installation parameter.
-          GitHub Actions repository variables control the zone, Visual Studio installation mode, and optional Dynatrace settings. Keep secrets in Secret Manager rather than GitHub variables.
-For unattended compilation where the IDE is unnecessary, Build Tools is usually
-          ### 3. Run the full Visual Studio build through GitHub Actions
+```
 
-          Set the Visual Studio Actions variables, then merge an application change to `main` or manually run the image workflow from GitHub Actions.
+Community Edition does not use a product key, so the default path does not
+pass a `--productKey` installation parameter. For unattended compilation where
+the IDE is unnecessary, Build Tools is usually faster and smaller.
+
+### 1. Create offline Visual Studio media on Windows
+
+Run this from a Windows administration machine with the Windows ADK available:
+
+```powershell
 .\tools\New-VS2022OfflineMedia.ps1 `
   -Edition Community `
   -LayoutPath C:\VS2022Layout `
   -IsoPath C:\VS2022Media\vs2022-community-layout.iso
-          Manually run the production deployment workflow from GitHub Actions. Its run remains active until the Cloud Build deployment and teardown complete.
+```
 
 The script uses `applications/sample/config/vs2022.vsconfig`, verifies the layout, builds an ISO with
 `oscdimg.exe`, and prints its SHA-256 hash. A complete layout can exceed 45 GB;

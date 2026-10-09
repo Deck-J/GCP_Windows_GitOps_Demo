@@ -29,7 +29,8 @@ echo '[PASS] Dev and Prod worker counts'
 
 if command -v pwsh >/dev/null 2>&1; then
   # PowerShell's parser provides syntax diagnostics without running the scripts.
-  pwsh -NoLogo -NoProfile -File - <<'POWERSHELL'
+  POWERSHELL_CHECK="$(mktemp)"
+  cat >"$POWERSHELL_CHECK" <<'POWERSHELL'
 $failed = $false
 Get-ChildItem -Path bootstrap, infrastructure, integrations, applications -Filter *.ps1 -Recurse | ForEach-Object {
     $tokens = $null
@@ -43,6 +44,11 @@ Get-ChildItem -Path bootstrap, infrastructure, integrations, applications -Filte
 if ($failed) { exit 1 }
 Write-Output '[PASS] PowerShell syntax'
 POWERSHELL
+  if ! pwsh -NoLogo -NoProfile -File "$POWERSHELL_CHECK"; then
+    rm -f "$POWERSHELL_CHECK"
+    exit 1
+  fi
+  rm -f "$POWERSHELL_CHECK"
 else
   echo '[WARN] PowerShell is unavailable; skipped PowerShell parser validation'
 fi
@@ -54,6 +60,13 @@ if command -v yamllint >/dev/null 2>&1; then
   echo '[PASS] YAML validation'
 else
   echo '[WARN] yamllint is unavailable; skipped YAML validation'
+fi
+
+if command -v actionlint >/dev/null 2>&1; then
+  actionlint .github/workflows/*.yml
+  echo '[PASS] GitHub Actions workflow validation'
+else
+  echo '[WARN] actionlint is unavailable; skipped GitHub Actions semantic validation'
 fi
 
 if [[ "$MODE" != "--syntax-only" ]]; then
